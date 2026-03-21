@@ -62,6 +62,29 @@ async def websocket_chat(websocket: WebSocket):
             msg_type = data.get("type")
             user_msg = data.get("message", "").strip()
 
+            if msg_type == "configure":
+                llm_cfg  = data.get("llm", {})
+                char_cfg = data.get("character", {})
+
+                global llm_client, LLM_MODEL, current_character, system_prompt
+
+                if llm_cfg.get("api_key") and llm_cfg.get("base_url"):
+                    llm_client = AsyncOpenAI(
+                        api_key=llm_cfg["api_key"],
+                        base_url=llm_cfg["base_url"],
+                    )
+                    LLM_MODEL = llm_cfg.get("model", LLM_MODEL)
+
+                if char_cfg:
+                    current_character = {**DEFAULT_CHARACTER, **char_cfg}
+                    system_prompt = build_system_prompt(current_character)
+
+                await websocket.send_text(json.dumps(
+                    {"type": "configure_ack", "message": "配置已更新"},
+                    ensure_ascii=False
+                ))
+                continue
+
             if msg_type != "chat" or not user_msg:
                 continue
 
@@ -78,10 +101,25 @@ async def websocket_chat(websocket: WebSocket):
                 reply = response.choices[0].message.content.strip()
 
             except Exception as e:
-                await websocket.send_text(json.dumps({
-                    "type": "error",
-                    "message": f"LLM 调用失败：{str(e)}"
-                }, ensure_ascii=False))
+                err_str = str(e)
+                # 识别常见错误类型，返回友好提示
+                if "api_key" in err_str.lower() or "401" in err_str or "authentication" in err_str.lower():
+                    friendly = "API Key 未配置或无效，请在设置中填写正确的 Key。"
+                elif "404" in err_str or "model" in err_str.lower():
+                    friendly = f"模型「{LLM_MODEL}」不存在，请在设置中确认模型名称。"
+                elif "429" in err_str or "rate" in err_str.lower():
+                    friendly = "请求太频繁啦，稍等一下再试试～"
+                elif "connect" in err_str.lower() or "network" in err_str.lower() or "timeout" in err_str.lower():
+                    friendly = "网络连接失败，请检查 API 地址是否正确。"
+                elif "base_url" in err_str.lower() or not LLM_API_KEY:
+                    friendly = "还没有配置 API Key，请先打开设置完成配置。"
+                else:
+                    friendly = f"出了点问题：{err_str[:80]}"
+
+                await websocket.send_text(json.dumps(
+                    {"type": "error", "message": friendly},
+                    ensure_ascii=False
+                ))
                 continue
 
             # ── 更新对话历史 ───────────────────────────────────

@@ -31,3 +31,9 @@ sidecar/.env
 
 # Rust 编译产物
 src-tauri/target/
+
+# Visual Studio 缓存
+.vs/
+
+# Python 编译缓存
+sidecar/__pycache__/
