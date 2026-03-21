@@ -64,7 +64,17 @@ cd sidecar
 pip install -r requirements.txt
 ```
 
-### 步骤 3：验证 Tauri 环境
+### 步骤 3：配置环境变量
+
+```bash
+# 复制配置模板
+copy sidecar\.env.example sidecar\.env
+
+# 用编辑器打开 sidecar/.env，填写你的 LLM 配置
+# 也可以在启动后通过设置界面配置
+```
+
+### 步骤 4：验证 Tauri 环境
 
 ```bash
 # 在项目根目录 reverie-link/ 下执行
@@ -73,28 +83,19 @@ npm run tauri info
 
 所有关键项显示 ✔ 后继续。
 
-### 步骤 4：一键启动开发环境
+### 步骤 5：一键启动开发环境
 
 ```bash
-# 在项目根目录 reverie-link/ 下执行
-.\start.bat
+# 终端 1：启动 Python 后端（在 venv 激活状态下）
+.\venv\Scripts\activate
+cd sidecar
+uvicorn main:app --reload --port 18000
+
+# 终端 2：启动 Tauri 前端
+npm run tauri dev
 ```
 
-该脚本将同时拉起：
-- Vite 前端热更新服务器（`localhost:17420`）
-- Python FastAPI 后端（`localhost:18000`，在 `sidecar/` 目录下执行）
-- Tauri 桌面窗口
-
-> 如需单独启动各服务：
-> ```bash
-> # 终端 1：在 reverie-link/ 下
-> npm run tauri dev
->
-> # 终端 2：在 reverie-link/ 下激活 venv 后，进入 sidecar/ 执行
-> .\venv\Scripts\activate
-> cd sidecar
-> uvicorn main:app --reload --port 18000
-> ```
+> **注意**：请先启动后端，再启动前端。后端运行在 `localhost:18000`，前端运行在 `localhost:17420`。
 
 ---
 
@@ -103,16 +104,26 @@ npm run tauri info
 ```
 📦 reverie-link/
  ┣ 📂 sidecar/              # Python 后端：LLM、VAD、RVC、游戏接口
- ┃ ┣ 📜 main.py             # FastAPI 主入口
+ ┃ ┣ 📜 main.py             # FastAPI + WebSocket 主入口
+ ┃ ┣ 📜 prompt_builder.py   # Prompt 组装模块（三层架构）
+ ┃ ┣ 📜 .env.example        # 环境变量模板（复制为 .env 后填写）
  ┃ ┗ 📜 requirements.txt    # Python 依赖清单
- ┣ 📂 src/                  # 前端源码：UI、设置面板、WebRTC 音频流
- ┃ ┣ 📂 components/         # Vue 组件
- ┃ ┗ 📂 live2d_assets/      # Live2D 模型文件
+ ┣ 📂 src/                  # 前端源码
+ ┃ ┣ 📜 App.vue             # 主窗口：桌宠 UI、气泡、控制栏
+ ┃ ┣ 📜 SettingsApp.vue     # 设置窗口：LLM 配置 + 角色预设管理
+ ┃ ┣ 📜 main.ts             # 主窗口挂载入口
+ ┃ ┗ 📜 settings-main.ts    # 设置窗口挂载入口
  ┣ 📂 src-tauri/            # Rust 容器：窗口穿透、置顶、系统托盘
  ┃ ┣ 📜 tauri.conf.json     # Tauri 核心配置
  ┃ ┗ 📜 Cargo.toml          # Rust 依赖清单
+ ┣ 📂 public/               # 静态资源
+ ┃ ┗ 📜 avatar.png          # 默认角色头像（Rei）
  ┣ 📂 venv/                 # Python 虚拟环境（不纳入版本控制）
- ┣ 📜 start.bat             # 开发环境一键启动脚本
+ ┣ 📜 index.html            # 主窗口 HTML 入口
+ ┣ 📜 settings.html         # 设置窗口 HTML 入口
+ ┣ 📜 vite.config.ts        # Vite 多页面构建配置
+ ┣ 📜 DECISIONS.md          # 开发决策记录
+ ┣ 📜 CHANGELOG.md          # 版本更新记录
  ┗ 📜 README.md
 ```
 
@@ -120,31 +131,42 @@ npm run tauri info
 
 ## 🗺️ 开发路线图
 
-### Phase 1：基建与核心交互层 🚧 *进行中*
+### Phase 1：基建与核心交互层 ✅ *已完成*
 
-- [ ] 搭建 Tauri + Vue 前端骨架：透明窗口、鼠标穿透、系统托盘
-- [ ] 搭建基础 Python 后端（FastAPI + WebSocket），入口在 `sidecar/main.py`
-- [ ] 开发模块化设置 UI：文本 / 视觉 / 语音 / 全局四分页配置面板
-- [ ] API Key 本地加密存储（Tauri 调用 Rust 写入）
-- [ ] 接入外部 LLM，解析 `chara_card_v2` 角色卡
-- [ ] 注入「50字简短回复」Prompt 强限制与 `max_tokens` 硬截断
-- [ ] 漫画风对话气泡 + 打字机动效，完成纯文本聊天联调
+- [x] Tauri + Vue 前端骨架：透明无边框窗口、动态尺寸缩放、位置记忆
+- [x] 鼠标穿透切换（托盘菜单控制 + 锁定状态悬停解锁按钮）
+- [x] 窗口拖拽
+- [x] 控制栏（悬停显示、逐个滑入动画）：锁定/解锁、设置、音量占位、输入
+- [x] Python FastAPI + WebSocket 后端，OpenAI 兼容层统一接入所有 LLM 厂商
+- [x] 漫画风对话气泡 + 打字机动效 + 思考中三点动画
+- [x] 设置独立窗口（水蓝水粉二次元配色）
+  - LLM 配置：15 家厂商预设、各厂商 API Key 独立存储、官网直达链接
+  - 角色预设管理：最多 10 个预设、卡片式展示、头像上传、生效中标识
+  - 保存确认弹框（支持填写一句话简介）
+- [x] 内置默认角色 Rei
+- [x] LLM 错误友好提示（API Key 无效、模型不存在、网络超时等）
+- [x] 发送超时保护（30 秒无响应自动重置）
 
 ### Phase 2：表现层与进阶语音层 📅 *计划中*
 
 - [ ] 引入 `pixi-live2d-display`，正则匹配情绪标签触发 Live2D 表情动作
+- [ ] Live2D 角色旁悬浮把手按钮（穿透切换，与托盘并行）
 - [ ] 接入 Edge-TTS（兜底）、ElevenLabs 云端语音引擎
 - [ ] 基于 `AudioContext` 实时音量映射 `ParamMouthOpenY`，实现唇音同步
 - [ ] 全双工语音系统：WebRTC AEC + 环形缓冲区防吞字 VAD
 - [ ] 打断机制（Barge-in）+ 本地预置语气词掩盖延迟
 - [ ] 动态免唤醒词倾听窗口
+- [ ] 全局快捷键（Ctrl+Space）触发输入框
 
 ### Phase 3：高级感知与硬核底层 📅 *计划中*
 
 - [ ] 游戏态势感知：CS2 GSI / LOL API / 局部视觉流三策略
 - [ ] 双通道视觉流：后台 VLM 粗看 + 前台顶级 VLM 细看
 - [ ] 三阶混合记忆架构：短期滑动窗口 + 核心档案 JSON 自动化 + ChromaDB 向量检索
+- [ ] 酒馆卡片（`chara_card_v2`）导入支持
+- [ ] API Key 迁移至 Tauri Rust 加密本地存储
 - [ ] RVC v2 便携式绿色环境：静默下载、隔离解压、Tauri Sidecar 拉起
+- [ ] 全局设置：记忆跨度滑动条、唤醒词、音量、开机自启、游戏感知开关
 - [ ] Tauri Build 最终打包，发布 v1.0 零环境依赖整合包
 
 ---
@@ -155,11 +177,11 @@ npm run tauri info
 ┌─────────────────────────────────────────┐
 │            Tauri (Rust)                 │  ← 窗口管理、置顶、穿透、系统托盘
 │  ┌───────────────────────────────────┐  │
-│  │     前端 (Vue + Vite)             │  │  ← UI、Live2D、WebRTC 音频
+│  │     前端 (Vue 3 + Vite)           │  │  ← UI、Live2D、WebRTC 音频
 │  │   Pixi.js + pixi-live2d-display   │  │
 │  └──────────────┬────────────────────┘  │
 └─────────────────┼───────────────────────┘
-                  │ WebSocket / HTTP
+                  │ WebSocket
 ┌─────────────────┴───────────────────────┐
 │       Python 后端 (sidecar/)            │
 │  LLM 对话 │ STT/TTS │ RVC │ 游戏感知   │
