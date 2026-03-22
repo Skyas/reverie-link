@@ -1,0 +1,30 @@
+{
+  "Type": "Live2D Expression",
+  "Parameters": [
+    {
+      "Id": "ParamMouthForm",
+      "Value": -1.0,
+      "Blend": "Overwrite"
+    },
+    {
+      "Id": "ParamBrowLY",
+      "Value": -0.8,
+      "Blend": "Overwrite"
+    },
+    {
+      "Id": "ParamBrowRY",
+      "Value": -0.8,
+      "Blend": "Overwrite"
+    },
+    {
+      "Id": "ParamBrowLForm",
+      "Value": -0.8,
+      "Blend": "Overwrite"
+    },
+    {
+      "Id": "ParamBrowRForm",
+      "Value": -0.8,
+      "Blend": "Overwrite"
+    }
+  ]
+}

@@ -1,14 +1,28 @@
 <!doctype html>
-<html lang="en">
-  <head>
+<html lang="zh-CN">
+<head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Tauri + Vue + Typescript App</title>
-  </head>
+    <title>Reverie Link</title>
 
-  <body>
+    <!--
+      ⚠️  Live2D Cubism Core（必须）
+      由于 Live2D 的许可证限制，Core 文件不能随项目分发，需自行下载。
+
+      获取方式：
+        1. 前往 https://www.live2d.com/en/sdk/download/web/
+        2. 下载 Cubism SDK for Web（免费注册后下载）
+        3. 解压后找到 Core/live2dcubismcore.min.js
+        4. 复制到本项目 public/ 目录
+
+      文件到位后取消注释下方这行：
+    -->
+    <script src="/live2dcubismcore.min.js"></script>
+
+</head>
+<body>
     <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
-  </body>
+</body>
 </html>

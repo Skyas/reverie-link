@@ -1,0 +1,77 @@
+{
+	"Version": 3,
+	"FileReferences": {
+		"Moc": "MO.moc3",
+		"Textures": [
+			"MO.4096/texture_00.png",
+			"MO.4096/texture_01.png",
+			"MO.4096/texture_02.png",
+			"MO.4096/texture_03.png",
+			"MO.4096/texture_04.png",
+			"MO.4096/texture_05.png",
+			"MO.4096/texture_06.png",
+			"MO.4096/texture_07.png",
+			"MO.4096/texture_08.png",
+			"MO.4096/texture_09.png"
+		],
+		"Physics": "MO.physics3.json",
+		"DisplayInfo": "MO.cdi3.json",
+		"Expressions": [
+			{
+				"Name": "happy",
+				"File": "expressions/happy.exp3.json"
+			},
+			{
+				"Name": "sad",
+				"File": "expressions/sad.exp3.json"
+			},
+			{
+				"Name": "angry",
+				"File": "expressions/angry.exp3.json"
+			},
+			{
+				"Name": "shy",
+				"File": "expressions/shy.exp3.json"
+			},
+			{
+				"Name": "surprised",
+				"File": "expressions/surprised.exp3.json"
+			},
+			{
+				"Name": "neutral",
+				"File": "expressions/neutral.exp3.json"
+			}
+		],
+		"Motions": {
+			"Idle": [
+				{
+					"File": "motion/1.motion3.json",
+					"FadeInTime": 0.5,
+					"FadeOutTime": 0.5
+				},
+				{
+					"File": "motion/2.motion3.json",
+					"FadeInTime": 0.3,
+					"FadeOutTime": 0.3
+				},
+				{
+					"File": "motion/3.motion3.json",
+					"FadeInTime": 0.2,
+					"FadeOutTime": 0.2
+				}
+			]
+		}
+	},
+	"Groups": [
+		{
+			"Target": "Parameter",
+			"Name": "EyeBlink",
+			"Ids": []
+		},
+		{
+			"Target": "Parameter",
+			"Name": "LipSync",
+			"Ids": []
+		}
+	]
+}
