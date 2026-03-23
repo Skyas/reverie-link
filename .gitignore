@@ -23,11 +23,20 @@ dist-ssr
 *.sln
 *.sw?
 
-# Python 虚拟环境
+# Python 环境
 venv/
+sidecar/tmp_audio/
+sidecar/__pycache__/
+*.pyc
+
+# 构建产物
+target/
+dist/
+node_modules/
 
 # 环境变量（含 API Key，禁止上传）
 sidecar/.env
+.env
 
 # Rust 编译产物
 src-tauri/target/
@@ -37,3 +46,6 @@ src-tauri/target/
 
 # Python 编译缓存
 sidecar/__pycache__/
+
+public/rvc/*
+!public/rvc/这里放本地RVC V2模型.txt
