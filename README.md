@@ -10,16 +10,18 @@
 
 ---
 
-## ✨ 核心特性（规划中）
+## ✨ 核心特性
 
 | 特性 | 说明 |
 |------|------|
 | 🪟 **极低占用 & 原生体验** | 基于 Tauri，起步内存仅需 20-50MB；支持鼠标穿透与透明异形窗口，安静陪伴，绝不卡顿 |
-| 🗣️ **全双工拟真语音交互** | WebRTC 硬件级回声消除、VAD 防吞字、打断机制与动态倾听窗口，像朋友般自然闲聊 |
-| 🎮 **沉浸式游戏态势感知** | 通过 GSI / 本地 API / 轻量 CV 三策略实现零延迟战况感知，专属电竞僚机 |
-| 🎭 **角色卡与灵魂注入** | 兼容 SillyTavern `chara_card_v2` 格式导入，随时换上最爱的纸片人设定 |
-| 🎙️ **双语音引擎** | ElevenLabs（云端极致拟真）与 RVC v2（本地免费克隆）无缝切换 |
-| 🧠 **三阶混合记忆架构** | 滑动窗口短期记忆 + 核心档案 JSON + 向量数据库长期摘要，永不遗忘 |
+| 🎭 **Live2D 模型渲染** | 拖入模型文件夹即用，支持情绪表情联动与唇音同步，任意 Live2D 模型无缝兼容 |
+| 🗣️ **双语音引擎** | ElevenLabs 云端拟真语音 与 本地 RVC v2 自训练音色，一键切换，唇音实时同步 |
+| 🌸 **角色卡系统** | 最多 10 个角色预设，即时切换，支持自定义人设、头像与对话示例 |
+| 🤖 **多厂商 LLM 接入** | 内置 15 家厂商预设，支持 DeepSeek / OpenAI / Gemini / Ollama 等任意兼容厂商 |
+| 🗣️ **全双工拟真语音交互** | WebRTC 硬件级回声消除、VAD 防吞字、打断机制与动态倾听窗口（开发中） |
+| 🎮 **沉浸式游戏态势感知** | 通过 GSI / 本地 API / 轻量 CV 三策略实现零延迟战况感知（规划中） |
+| 🧠 **三阶混合记忆架构** | 滑动窗口短期记忆 + 核心档案 JSON + 向量数据库长期摘要（规划中） |
 
 ---
 
@@ -36,6 +38,12 @@
 - Python `3.10+`
 - `venv` 虚拟环境（必须）：确保开发依赖与最终便携包保持一致
 
+### 系统依赖
+- FFmpeg（RVC 本地语音功能依赖，需加入系统 PATH）
+  ```powershell
+  winget install ffmpeg
+  ```
+
 ---
 
 ## 🚀 快速启动（开发环境）
@@ -43,7 +51,6 @@
 ### 步骤 1：克隆并安装前端依赖
 
 ```bash
-# 在项目根目录 reverie-link/ 下执行
 git clone https://github.com/Skyas/reverie-link.git
 cd reverie-link
 npm install
@@ -52,14 +59,12 @@ npm install
 ### 步骤 2：初始化 Python 虚拟环境
 
 ```bash
-# 在项目根目录 reverie-link/ 下执行
 python -m venv venv
 
 # 激活虚拟环境
 .\venv\Scripts\activate          # Windows
 # source venv/bin/activate       # macOS / Linux
 
-# 安装后端依赖
 cd sidecar
 pip install -r requirements.txt
 ```
@@ -67,9 +72,7 @@ pip install -r requirements.txt
 ### 步骤 3：配置环境变量
 
 ```bash
-# 复制配置模板
 copy sidecar\.env.example sidecar\.env
-
 # 用编辑器打开 sidecar/.env，填写你的 LLM 配置
 # 也可以在启动后通过设置界面配置
 ```
@@ -77,7 +80,6 @@ copy sidecar\.env.example sidecar\.env
 ### 步骤 4：验证 Tauri 环境
 
 ```bash
-# 在项目根目录 reverie-link/ 下执行
 npm run tauri info
 ```
 
@@ -99,24 +101,55 @@ npm run tauri dev
 
 ---
 
+## 🎭 模型文件配置
+
+### Live2D 模型
+
+将模型文件夹放入 `public/live2d/`，程序启动后自动识别，在设置界面「全局设置」中选择：
+
+```
+public/live2d/
+└── 你的模型名/
+    ├── 模型名.model3.json
+    ├── 模型名.moc3
+    ├── 贴图文件夹/
+    └── animations/ 或 motion/（可选，有则自动注册）
+```
+
+### RVC 音色
+
+将音色文件放入 `public/rvc/`，**`.pth` 与 `.index` 文件名必须一致**（如 `Hibiki.pth` + `Hibiki.index`），程序自动扫描识别，不匹配时界面会给出提示：
+
+```
+public/rvc/
+├── Hibiki.pth      ← 模型权重
+└── Hibiki.index    ← 特征索引（同名配对）
+```
+
+> 首次使用 RVC 时，程序会自动下载 `hubert_base.pt` 和 `rmvpe.pt`（合计约数百 MB）。
+
+---
+
 ## 📂 项目目录结构
 
 ```
 📦 reverie-link/
- ┣ 📂 sidecar/              # Python 后端：LLM、VAD、RVC、游戏接口
+ ┣ 📂 sidecar/              # Python 后端：LLM、TTS、RVC、游戏接口
  ┃ ┣ 📜 main.py             # FastAPI + WebSocket 主入口
  ┃ ┣ 📜 prompt_builder.py   # Prompt 组装模块（三层架构）
  ┃ ┣ 📜 .env.example        # 环境变量模板（复制为 .env 后填写）
  ┃ ┗ 📜 requirements.txt    # Python 依赖清单
  ┣ 📂 src/                  # 前端源码
- ┃ ┣ 📜 App.vue             # 主窗口：桌宠 UI、气泡、控制栏
- ┃ ┣ 📜 SettingsApp.vue     # 设置窗口：LLM 配置 + 角色预设管理
+ ┃ ┣ 📜 App.vue             # 主窗口：桌宠 UI、Live2D、气泡、语音
+ ┃ ┣ 📜 SettingsApp.vue     # 设置窗口：LLM / 角色 / 全局配置
  ┃ ┣ 📜 main.ts             # 主窗口挂载入口
  ┃ ┗ 📜 settings-main.ts    # 设置窗口挂载入口
  ┣ 📂 src-tauri/            # Rust 容器：窗口穿透、置顶、系统托盘
  ┃ ┣ 📜 tauri.conf.json     # Tauri 核心配置
  ┃ ┗ 📜 Cargo.toml          # Rust 依赖清单
  ┣ 📂 public/               # 静态资源
+ ┃ ┣ 📂 live2d/             # Live2D 模型目录（用户自行放置）
+ ┃ ┣ 📂 rvc/                # RVC 音色目录（用户自行放置）
  ┃ ┗ 📜 avatar.png          # 默认角色头像（Rei）
  ┣ 📂 venv/                 # Python 虚拟环境（不纳入版本控制）
  ┣ 📜 index.html            # 主窗口 HTML 入口
@@ -143,31 +176,41 @@ npm run tauri dev
   - LLM 配置：15 家厂商预设、各厂商 API Key 独立存储、官网直达链接
   - 角色预设管理：最多 10 个预设、卡片式展示、头像上传、生效中标识
   - 保存确认弹框（支持填写一句话简介）
-- [x] 内置默认角色 Rei
+- [x] 内置默认角色 Rei（傲娇猫娘）
 - [x] LLM 错误友好提示（API Key 无效、模型不存在、网络超时等）
 - [x] 发送超时保护（30 秒无响应自动重置）
 
-### Phase 2：表现层与进阶语音层 📅 *计划中*
+### Phase 2：表现层与进阶语音层 🚧 *进行中*
 
-- [ ] 引入 `pixi-live2d-display`，正则匹配情绪标签触发 Live2D 表情动作
-- [ ] Live2D 角色旁悬浮把手按钮（穿透切换，与托盘并行）
-- [ ] 接入 Edge-TTS（兜底）、ElevenLabs 云端语音引擎
-- [ ] 基于 `AudioContext` 实时音量映射 `ParamMouthOpenY`，实现唇音同步
-- [ ] 全双工语音系统：WebRTC AEC + 环形缓冲区防吞字 VAD
-- [ ] 打断机制（Barge-in）+ 本地预置语气词掩盖延迟
-- [ ] 动态免唤醒词倾听窗口
-- [ ] 全局快捷键（Ctrl+Space）触发输入框
+- [x] Live2D 模型渲染（pixi-live2d-display，双缓冲无闪烁）
+- [x] 模型管理系统（拖入即用，设置界面列表切换）
+- [x] 每模型独立 zoom/Y 偏移配置，可视化调节
+- [x] 多状态手臂部件自动归位（PartOpacity 处理）
+- [x] 6 种情绪表情系统（AI 标签驱动，双模式兼容：exp3.json / 参数回退）
+- [x] ElevenLabs 云端语音合成
+- [x] 本地 RVC v2 语音合成（pyttsx3 底层 + RVC 变声）
+- [x] 唇音同步（AudioContext Analyser 实时驱动 ParamMouthOpenY）
+- [x] 角色卡即时切换（Tauri 事件通知，无需重启）
+- [x] 全局设置 Tab（模型管理 / 尺寸档位 / 语音配置）
+- [ ] 全双工语音系统：Silero-VAD + FunASR 流式 STT
+- [ ] 唤醒词 + 全局快捷键按住说话
+- [ ] 打断机制 + 动态免唤醒倾听窗口
 
 ### Phase 3：高级感知与硬核底层 📅 *计划中*
 
 - [ ] 游戏态势感知：CS2 GSI / LOL API / 局部视觉流三策略
-- [ ] 双通道视觉流：后台 VLM 粗看 + 前台顶级 VLM 细看
-- [ ] 三阶混合记忆架构：短期滑动窗口 + 核心档案 JSON 自动化 + ChromaDB 向量检索
-- [ ] 酒馆卡片（`chara_card_v2`）导入支持
+- [ ] 三阶混合记忆架构：短期滑动窗口 + 核心档案 JSON + ChromaDB 向量检索
 - [ ] API Key 迁移至 Tauri Rust 加密本地存储
-- [ ] RVC v2 便携式绿色环境：静默下载、隔离解压、Tauri Sidecar 拉起
-- [ ] 全局设置：记忆跨度滑动条、唤醒词、音量、开机自启、游戏感知开关
+- [ ] RVC v2 便携式绿色环境：静默下载、隔离解压
 - [ ] Tauri Build 最终打包，发布 v1.0 零环境依赖整合包
+
+### Phase 4：打磨与扩展 📅 *计划中*
+
+- [ ] ElevenLabs 流式播放（体感延迟 < 500ms）
+- [ ] emotion_map.json 可视化编辑入口（模型表情名称映射）
+- [ ] 待机动画系统（定时随机 / AI 标签控制）
+- [ ] 模型装扮面板（参数滑条，cdi3.json 读取）
+- [ ] 酒馆角色卡（chara_card_v2）导入
 
 ---
 
@@ -177,15 +220,15 @@ npm run tauri dev
 ┌─────────────────────────────────────────┐
 │            Tauri (Rust)                 │  ← 窗口管理、置顶、穿透、系统托盘
 │  ┌───────────────────────────────────┐  │
-│  │     前端 (Vue 3 + Vite)           │  │  ← UI、Live2D、WebRTC 音频
+│  │     前端 (Vue 3 + Vite)           │  │  ← UI、Live2D、Web Audio
 │  │   Pixi.js + pixi-live2d-display   │  │
 │  └──────────────┬────────────────────┘  │
 └─────────────────┼───────────────────────┘
-                  │ WebSocket
+                  │ WebSocket / HTTP
 ┌─────────────────┴───────────────────────┐
 │       Python 后端 (sidecar/)            │
-│  LLM 对话 │ STT/TTS │ RVC │ 游戏感知   │
-│  记忆架构 │ VAD     │ VLM │ 向量数据库 │
+│  LLM 对话 │ ElevenLabs │ RVC v2 变声   │
+│  记忆架构 │ VAD / STT  │ 游戏感知      │
 └─────────────────────────────────────────┘
 ```
 

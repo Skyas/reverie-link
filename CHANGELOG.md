@@ -5,11 +5,77 @@
 
 ---
 
+## [Unreleased] - Phase 2 开发中
+
+> Phase 2 开发进行中，尚未发布正式版本号。
+
+### 新增（Phase 2）
+
+**Live2D 渲染系统**
+- 接入 pixi.js + pixi-live2d-display，实现 Live2D 模型渲染（透明背景，无闪烁）
+- 双缓冲渲染架构（RenderTexture 离屏渲染 + WebGL 双缓冲），彻底解决 DWM 截帧闪烁问题
+- 模型管理系统：用户将模型文件夹放入 `public/live2d/` 即可自动识别，无需任何配置
+- 设置界面「全局设置」Tab 提供模型列表，点击即时切换，无需重启
+- 每个模型独立存储 zoom/Y 偏移显示配置，设置界面可可视化调节
+- 多状态手臂部件自动归位（`setPartOpacityById` 处理 PartArmA/PartArmB 等）
+- VTS 免费模型兼容支持（`animations/` 文件夹自动识别）
+
+**情绪表情系统**
+- 6 种情绪标签：`[happy]` `[sad]` `[angry]` `[shy]` `[surprised]` `[neutral]`
+- AI 回复携带情绪标签，前端正则提取后剥离，标签不显示在气泡、不被 TTS 读出
+- 双模式兼容：有表情文件（exp3.json）走官方接口；无表情文件自动用标准参数（ParamMouthForm / ParamBrowLY 等）回退，覆盖绝大多数标准模型
+- 表情触发 3 秒后自动归位 neutral
+- 为 MO 模型内置 6 个 exp3.json 表情文件
+
+**语音合成系统**
+- 双引擎架构：ElevenLabs 云端 / 本地 RVC v2，在设置界面一键切换
+- ElevenLabs：`eleven_flash_v2_5` 模型，最低延迟，API Key + Voice ID 本地存储
+- 本地 RVC v2：用户将 `.pth` + `.index` 放入 `public/rvc/`，自动扫描识别
+  - 命名规范强制：同名配对（`Hibiki.pth` + `Hibiki.index`），不匹配时界面显示黄色警告
+  - 底层 TTS 使用 Windows SAPI（pyttsx3，完全离线）
+  - 推理参数：rmvpe 算法，index_rate=0.75，protect=0.33
+- 唇音同步：`AudioContext.createAnalyser()` 实时提取音量，映射至 `ParamMouthOpenY`
+
+**设置界面扩展**
+- 新增「全局设置」Tab（第三个 Tab）：
+  - Live2D 模型列表与切换
+  - 模型显示调节（zoom / Y 偏移滑条，每模型独立配置）
+  - 窗口尺寸三档（小 200×270 / 中 280×380 / 大 380×510）
+- AI 模型 Tab 新增语音配置区：ElevenLabs / 本地 RVC 引擎选择器 + 各自配置字段
+- 角色卡切换即时生效（通过 Tauri 事件通知主窗口，经持久 WS 连接同步到后端）
+- 前端启动时自动从 localStorage 恢复并发送配置到后端，无需手动重新保存
+
+**后端新增接口**
+- `GET /api/live2d/models`：扫描 `public/live2d/` 返回模型列表
+- `GET /api/rvc/voices`：扫描 `public/rvc/` 返回音色列表（含同名 index 配对检测）
+- `POST /api/tts`：ElevenLabs TTS 代理接口
+- `POST /api/tts/local`：本地 RVC 语音合成接口（pyttsx3 → RVC v2 → WAV）
+
+### 技术依赖（新增）
+
+| 层 | 新增依赖 |
+|----|---------|
+| Node | `pixi.js@^6.5.10`、`pixi-live2d-display@^0.4.0` |
+| Python | `httpx`、`pyttsx3`、`rvc-python`、`torch`（rvc-python 依赖） |
+| 系统 | `FFmpeg`（RVC 音频处理依赖，需加入系统 PATH） |
+| 外部服务 | `ElevenLabs API`（可选，云端语音） |
+
+### 已知问题 / 待优化
+
+- 本地 RVC 推理在 CPU 模式下较慢（无 NVIDIA GPU 时自动回退）
+- ElevenLabs 延迟约 2 秒（受海外网络影响），流式优化规划至 Phase 4
+- 锁定状态解锁按钮的出现/消失时机和动画仍有瑕疵
+- API Key 目前存储在 localStorage，Phase 3 将迁移至 Tauri Rust 加密存储
+- 音量按钮为占位，全双工语音系统（Phase 2 后续）接入后实现真实音量控制
+- MO 黑白线条模型在透明窗口下与 pixi-live2d-display 存在兼容性问题（已挂起，VTS 免费模型不受影响）
+
+---
+
 ## [Unreleased] - Phase 1 完成存档
 
-> Phase 1 开发完成，尚未发布正式版本号。以下为本阶段全部变更记录。
+> Phase 1 开发完成。
 
-### 新增
+### 新增（Phase 1）
 
 **窗口与系统层**
 - 透明无边框置顶窗口，支持鼠标穿透切换
@@ -29,38 +95,20 @@
 
 **设置窗口**
 - 独立设置窗口（520×620，水蓝水粉二次元配色）
-- LLM 配置 Tab：
-  - 15 家厂商预设（DeepSeek / OpenAI / 千问 / 豆包 / 硅基流动 / Gemini / OpenRouter / MiniMax / Kimi / 智谱 / 混元 / 百川 / 启航AI / Ollama / 自定义）
-  - 各厂商 API Key 独立存储，切换厂商自动加载对应 Key
-  - 预设厂商 base_url 只读，防止误修改
-  - 官网直达链接（调用系统浏览器打开）
-  - 本地模型（Ollama）不显示 API Key 输入框
-- 角色设定 Tab：
-  - 最多 10 个角色预设，卡片式列表展示
-  - 卡片显示头像、名称、一句话简介、生效中蓝色标识
-  - 头像支持用户自行上传（base64 存储）
-  - 保存时弹框确认并填写简介
-  - 默认预设 Rei 不可删除，始终置于列表第一位
-  - 激活预设自动同步到后端，跨会话记忆生效中的预设
+- LLM 配置 Tab：15 家厂商预设，各厂商 API Key 独立存储，官网直达链接
+- 角色设定 Tab：最多 10 个角色预设，卡片式列表，头像上传，激活预设即时同步后端
 - Toast 顶部通知（成功/警告两种样式）
 
 **内置内容**
 - 默认角色 Rei：傲娇猫娘，Reverie Link 吉祥物，内置完整角色设定与对话示例
-- 默认头像（AI 生成，作者自有）
 
-### 技术依赖
+### 技术依赖（Phase 1）
 
 | 层 | 依赖 |
 |----|------|
 | Rust | `tauri 2`、`tauri-plugin-opener 2`、`enigo 0.2`、`serde`、`serde_json` |
 | Node | `vue 3.5`、`@tauri-apps/api 2`、`@tauri-apps/plugin-opener 2`、`vite 6`、`vue-tsc` |
 | Python | `fastapi`、`uvicorn[standard]`、`openai`、`python-dotenv` |
-
-### 已知问题 / 待优化
-
-- 锁定状态解锁按钮的出现/消失时机和动画仍有瑕疵（见 DECISIONS.md）
-- API Key 目前存储在 localStorage，Phase 3 将迁移至 Tauri Rust 加密存储
-- 音量按钮为占位，Phase 2 语音接入后实现真实音量控制
 
 ---
 
