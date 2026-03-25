@@ -3,5 +3,12 @@ uvicorn[standard]
 openai
 python-dotenv
 httpx
-edge-tts
-rvc-python
+chromadb
+# --- 下面是 Bert-VITS2 运行必备的基础库 ---
+torch
+torchaudio
+transformers
+librosa
+jieba
+cn2an
+pypinyin

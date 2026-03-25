@@ -88,8 +88,8 @@ def generate_summary_id() -> str:
 
 def now_iso() -> str:
     """返回当前时间的 ISO 8601 字符串（UTC，精确到毫秒）"""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + \
-           f"{datetime.now(timezone.utc).microsecond // 1000:03d}Z"
+    now = datetime.now(timezone.utc)
+    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
 
 
 # ── 消息数据模型 ──────────────────────────────────────────────────
@@ -102,6 +102,8 @@ class TimelineMessage:
 
     所有通道（文字、语音、游戏事件）共享此结构，
     通过 type 字段区分来源。
+
+    character_id 绑定角色卡（preset.id），确保不同角色的记忆完全隔离。
     """
     id: str                                 # 唯一标识
     timestamp: str                          # ISO 8601 UTC
@@ -110,6 +112,7 @@ class TimelineMessage:
     reply_to: Optional[str] = None          # 关联消息 id
     metadata: dict[str, Any] = field(default_factory=dict)
     session_id: str = ""                    # 所属会话
+    character_id: str = ""                  # 绑定角色卡 preset.id（Phase 3 角色隔离）
 
     @classmethod
     def create(
@@ -117,6 +120,7 @@ class TimelineMessage:
         msg_type: MessageType,
         content: str,
         session_id: str,
+        character_id: str = "",
         reply_to: Optional[str] = None,
         metadata: Optional[dict] = None,
     ) -> TimelineMessage:
@@ -129,6 +133,7 @@ class TimelineMessage:
             reply_to=reply_to,
             metadata=metadata or {},
             session_id=session_id,
+            character_id=character_id,
         )
 
     def to_dict(self) -> dict:
@@ -154,7 +159,6 @@ class TimelineMessage:
         转为注入 Prompt 的时间线格式文本。
         包含时间戳和类型标记，便于 AI 理解上下文时序。
         """
-        # 提取本地时间用于显示（更自然）
         ts_short = self.timestamp[:19].replace("T", " ")
 
         if self.type in (MessageType.USER_TEXT, MessageType.USER_VOICE):
@@ -176,6 +180,8 @@ class NotebookEntry:
     """
     笔记本中的一条记忆条目。
     对应 PHASE3_MEMORY_DESIGN.md § 5 定义的结构。
+
+    character_id 绑定角色卡，确保不同角色的笔记本完全隔离。
     """
     id: str                         # 唯一标识
     source: NotebookSource          # 来源：manual | auto
@@ -183,6 +189,7 @@ class NotebookEntry:
     tags: list[str]                 # 标签列表
     created_at: str                 # ISO 8601
     updated_at: str                 # ISO 8601
+    character_id: str = ""          # 绑定角色卡 preset.id（Phase 3 角色隔离）
 
     @classmethod
     def create(
@@ -190,6 +197,7 @@ class NotebookEntry:
         source: NotebookSource,
         content: str,
         tags: list[str],
+        character_id: str = "",
     ) -> NotebookEntry:
         """工厂方法：自动填充 id 和时间"""
         ts = now_iso()
@@ -200,6 +208,7 @@ class NotebookEntry:
             tags=tags,
             created_at=ts,
             updated_at=ts,
+            character_id=character_id,
         )
 
     def to_dict(self) -> dict:
