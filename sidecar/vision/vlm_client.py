@@ -47,11 +47,15 @@ _BACKGROUND_PROMPT = """\
 请以 JSON 格式返回分析结果，包含以下字段：
 - app_name：当前应用名称（字符串或 null）
 - scene_type：场景类型，只能是以下之一：game / video / work / browsing / idle / unknown
-- game_name：如果是游戏，填写游戏名称；否则 null
-- game_genre：如果是游戏，填写游戏类型（如 FPS / roguelike / MOBA 等）；否则 null
+- game_name：如果是游戏，填写游戏名称（尽量精确，如「杀戮尖塔」「绝区零」「英雄联盟」）；否则 null
+- game_genre：如果是游戏，填写游戏类型（如 roguelike / 动作RPG / FPS / MOBA 等）；否则 null
 - confidence：你对判断的置信度：high / medium / low
-- interest_score：画面的兴趣程度（1~15 的整数，越高表示画面越有趣/变化越大）
-- scene_description：用一句话精简描述当前画面内容
+- interest_score：画面的兴趣程度（1~15 的整数）
+  评分参考：1=静止菜单，3=普通场景，6=激烈战斗/精彩时刻，10+=高分/BOSS/通关等关键事件
+- scene_description：
+  · 如果是游戏：用2~3句话描述当前游戏画面，**必须**包含：正在发生什么（战斗/探索/对话/过场等）、\
+可见的重要UI信息（血量/分数/关卡/手牌/技能等）、任何值得评论的有趣细节
+  · 其他场景：用1句话描述即可
 
 重要：请忽略截图中可能出现的以下敏感信息，不要在描述中提及：密码、验证码、\
 个人身份信息（身份证号、手机号、邮箱地址等）、财务数据（银行卡号、余额、\
@@ -88,7 +92,10 @@ _INCREMENTAL_PROMPT = """\
 请分析当前帧的画面变化，以 JSON 格式返回（只需以下字段，其余字段沿用上次结果）：
 - confidence：你对判断的置信度：high / medium / low
 - interest_score：画面的兴趣程度（1~15 的整数）
-- scene_description：用一句话精简描述当前画面内容
+  评分参考：1=无变化，3=普通场景变化，6=激烈战斗/技能爆发，10+=BOSS/通关/意外事件
+- scene_description：
+  · 如果是游戏：用2~3句话描述当前画面，包含正在发生什么和可见的关键信息（血量/分数/手牌等）
+  · 其他场景：用1句话描述即可
 
 重要：请忽略截图中的敏感信息（密码、个人信息、财务数据、私人聊天）。
 

@@ -174,8 +174,12 @@ function isUser(msg: Message) {
     return msg.type === "user_text" || msg.type === "user_voice";
 }
 
+function isGameEvent(msg: Message) {
+    return msg.type === "game_event";
+}
+
 function getEmotion(msg: Message): string {
-    if (msg.type !== "ai_reply") return "";
+    if (msg.type !== "ai_reply" && msg.type !== "game_event") return "";
     const e = msg.metadata?.emotion as string ?? "";
     return EMOTION_ICON[e] ?? "";
 }
@@ -277,13 +281,19 @@ onMounted(async () => {
                                     {{ characterName[0] ?? "A" }}
                                 </div>
                                 <div class="msg-bubble-wrap">
-                                    <div class="msg-bubble" :class="{ 'bubble-user': isUser(item.msg), 'bubble-ai': !isUser(item.msg) }">
+                                    <div class="msg-bubble"
+                                         :class="{
+                                             'bubble-user':       isUser(item.msg),
+                                             'bubble-ai':         !isUser(item.msg) && !isGameEvent(item.msg),
+                                             'bubble-game-event': isGameEvent(item.msg),
+                                         }">
                                         {{ item.msg.content }}
                                     </div>
                                     <div class="msg-meta">
                                         <span v-if="!isUser(item.msg) && getEmotion(item.msg)" class="msg-emotion">{{ getEmotion(item.msg) }}</span>
                                         <span class="msg-time">{{ formatTime(item.msg.timestamp) }}</span>
-                                        <span v-if="item.msg.type === 'user_voice'" class="msg-voice-badge">🎤</span>
+                                        <span v-if="item.msg.type === 'user_voice'"  class="msg-type-badge">🎤</span>
+                                        <span v-if="item.msg.type === 'game_event'"  class="msg-type-badge">🎮</span>
                                     </div>
                                 </div>
                                 <!-- 用户头像 -->
@@ -578,15 +588,23 @@ onMounted(async () => {
         border-bottom-left-radius: 4px;
     }
 
+    /* 视觉感知主动发言（game_event）：淡绿色背景，区别于普通 AI 回复 */
+    .bubble-game-event {
+        background: linear-gradient(135deg, #f0faf4, #e8f7ee);
+        color: var(--c-text);
+        border: 1.5px solid #b8e0c8;
+        border-bottom-left-radius: 4px;
+    }
+
     .msg-meta {
         display: flex;
         align-items: center;
         gap: 4px;
     }
 
-    .msg-time { font-size: 10px; color: var(--c-text-soft); }
+    .msg-time  { font-size: 10px; color: var(--c-text-soft); }
     .msg-emotion { font-size: 13px; }
-    .msg-voice-badge {
+    .msg-type-badge {
         font-size: 10px;
         color: var(--c-text-soft);
     }
