@@ -192,6 +192,43 @@
         showMsg("✓ 尺寸已保存，重启后生效");
     }
 
+    // ── Phase 3: 视觉感知配置 ─────────────────────────────────────
+    const VISION_TALK_OPTIONS = [
+        { value: 0, label: "话少",        desc: "阈值 30，安静" },
+        { value: 1, label: "适中（默认）", desc: "阈值 20，平衡" },
+        { value: 2, label: "话多",        desc: "阈值 12，活跃" },
+    ];
+
+    function _loadVisionCfg() {
+        try { return JSON.parse(localStorage.getItem("rl-vision") || "{}"); } catch { return {}; }
+    }
+    const _vc = _loadVisionCfg();
+
+    const visionEnabled      = ref<boolean>(!!_vc.enabled);
+    const visionVlmBaseUrl   = ref<string>(_vc.vlm_base_url   ?? "https://open.bigmodel.cn/api/paas/v4/");
+    const visionVlmApiKey    = ref<string>(_vc.vlm_api_key    ?? "");
+    const visionVlmModel     = ref<string>(_vc.vlm_model      ?? "glm-4v-flash");
+    const visionTalkLevel    = ref<number>(_vc.talk_level      ?? 1);
+    const visionCooldown     = ref<number>(_vc.cooldown_seconds ?? 20);
+    const visionManualGameMode = ref<boolean>(!!_vc.manual_game_mode);
+
+    async function saveVision() {
+        const cfg = {
+            enabled:          visionEnabled.value,
+            vlm_base_url:     visionVlmBaseUrl.value.trim(),
+            vlm_api_key:      visionVlmApiKey.value.trim(),
+            vlm_model:        visionVlmModel.value.trim() || "glm-4v-flash",
+            talk_level:       visionTalkLevel.value,
+            cooldown_seconds: visionCooldown.value,
+            manual_game_mode: visionManualGameMode.value,
+        };
+        localStorage.setItem("rl-vision", JSON.stringify(cfg));
+        const llmCfg  = JSON.parse(localStorage.getItem("rl-llm")      || "{}");
+        const charCfg = JSON.parse(localStorage.getItem("rl-character") || "{}");
+        await sendConfigToBackend(llmCfg, charCfg, { vision: cfg });
+        showMsg("✓ 视觉感知配置已保存");
+    }
+
     // ── 全局设置：记忆窗口档位 ────────────────────────────────────
     const MEMORY_WINDOW_OPTIONS = [
         { index: 0, label: "极速省流",    desc: "3分钟 / 5轮",  token: "~2,000 tokens",  warn: false },
@@ -1073,13 +1110,86 @@
 
                 <div class="divider"></div>
 
-                <!-- Phase 3 占位 -->
-                <div class="global-section global-section-disabled">
-                    <div class="global-section-title">🎮 游戏感知 <span class="coming-badge">Phase 3</span></div>
-                    <label class="toggle-row">
-                        <span class="field-label">启用游戏感知</span>
-                        <input type="checkbox" disabled />
+                <!-- Phase 3: 视觉感知 -->
+                <div class="global-section">
+                    <div class="global-section-title">🎮 视觉感知</div>
+
+                    <!-- 总开关 -->
+                    <label class="toggle-row" style="margin-bottom:10px;">
+                        <span class="field-label">启用视觉感知</span>
+                        <input type="checkbox" v-model="visionEnabled" @change="saveVision" />
                     </label>
+
+                    <!-- 隐私说明 -->
+                    <p class="field-hint" style="color:var(--c-text-soft);margin-bottom:12px;">
+                        🔒 隐私说明：截图仅在内存中存在，用于实时分析后立即释放，永不保存到磁盘。
+                    </p>
+
+                    <template v-if="visionEnabled">
+                        <!-- VLM 配置 -->
+                        <div class="field-group" style="margin-bottom:8px;">
+                            <label class="field-label">VLM API Base URL</label>
+                            <input class="field-input" v-model="visionVlmBaseUrl"
+                                   placeholder="https://open.bigmodel.cn/api/paas/v4/" />
+                        </div>
+                        <div class="field-group" style="margin-bottom:8px;">
+                            <label class="field-label">VLM API Key</label>
+                            <input class="field-input" type="password" v-model="visionVlmApiKey"
+                                   placeholder="填写 VLM API Key（如 GLM-4V-Flash）" />
+                        </div>
+                        <div class="field-group" style="margin-bottom:12px;">
+                            <label class="field-label">VLM 模型名称</label>
+                            <input class="field-input" v-model="visionVlmModel"
+                                   placeholder="glm-4v-flash" />
+                        </div>
+
+                        <!-- VLM 不可用提示 -->
+                        <div v-if="visionEnabled && !visionVlmApiKey"
+                             style="background:#fffbe6;border:1px solid #f0c040;border-radius:6px;
+                                    padding:8px 12px;font-size:12px;color:#8a6000;margin-bottom:12px;">
+                            ⚠️ 视觉模型未配置或不可用。请填写 VLM API Key，或在「AI 模型」Tab 配置支持多模态的文本模型（如 GPT-4o）。
+                        </div>
+
+                        <!-- 话痨程度 -->
+                        <div class="field-group" style="margin-bottom:12px;">
+                            <label class="field-label">话痨程度</label>
+                            <div class="size-options" style="gap:8px;margin-top:6px;">
+                                <div v-for="opt in VISION_TALK_OPTIONS" :key="opt.value"
+                                     class="size-card"
+                                     :class="{ active: visionTalkLevel === opt.value }"
+                                     @click="visionTalkLevel = opt.value; saveVision()">
+                                    <div class="size-label">{{ opt.label }}</div>
+                                    <div class="size-desc">{{ opt.desc }}</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 冷却时间 -->
+                        <div class="field-group" style="margin-bottom:12px;">
+                            <label class="field-label">
+                                主动发言冷却
+                                <span class="field-note">{{ visionCooldown }} 秒</span>
+                            </label>
+                            <input type="range" class="field-range"
+                                   min="5" max="120" step="5"
+                                   v-model.number="visionCooldown"
+                                   @change="saveVision" />
+                        </div>
+
+                        <!-- 手动观战模式 -->
+                        <label class="toggle-row" style="margin-bottom:12px;">
+                            <span class="field-label">
+                                手动观战模式
+                                <span class="field-note">强制标记当前为游戏场景</span>
+                            </span>
+                            <input type="checkbox" v-model="visionManualGameMode" @change="saveVision" />
+                        </label>
+
+                        <!-- 保存按钮 -->
+                        <div class="action-row">
+                            <button class="save-btn" @click="saveVision">保存视觉感知配置</button>
+                        </div>
+                    </template>
                 </div>
 
                 <div class="divider"></div>
