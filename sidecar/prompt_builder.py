@@ -99,6 +99,12 @@ def build_system_prompt(character: dict) -> str:
         "例如：「哼，谁要你说这种话。[angry]」"
     )
 
+    # ── 截屏意图识别指令（Phase 3 视觉感知）─────────────────
+    prompt_parts.append(
+        "\n【屏幕观察】当你判断用户希望你观察屏幕画面时，"
+        "在回复的最开头输出 [NEED_SCREENSHOT] 标签（仅此一个标签，无需其他解释）。"
+    )
+
     # ── 硬性约束（始终在最后，防止被覆盖）───────────────────
     prompt_parts.append(
         "\n【重要限制】这是一段语音对话场景。"
@@ -200,6 +206,153 @@ def build_messages(
     return messages
  
  
+def build_vision_speech_messages(
+    system_prompt: str,
+    trigger: dict,
+) -> list[dict]:
+    """
+    为视觉感知主动发言组装 LLM messages。
+
+    trigger 格式（来自 VisionSystem._check_speech）：
+      {
+        "reason":         "interest_threshold" | "silence_fallback",
+        "context_prompt": str,   # 缓冲池摘要（已消费事件列表）
+        "scene_info":     {
+          "scene_type": str,
+          "scene_description": str,
+          "game_name": str | None,
+          "game_genre": str | None,
+          "confidence": str,
+          "scene_instruction": str,
+        },
+        "session_id":    str,
+        "character_id":  str,
+      }
+    """
+    scene_info  = trigger.get("scene_info", {})
+    ctx_prompt  = trigger.get("context_prompt", "")
+    scene_type  = scene_info.get("scene_type", "unknown")
+    game_name   = scene_info.get("game_name")
+    game_genre  = scene_info.get("game_genre")
+    confidence  = scene_info.get("confidence", "low")
+    instruction = scene_info.get("scene_instruction", "")
+    desc        = scene_info.get("scene_description", "")
+
+    # 组装用户侧视觉上下文（以 system 消息追加形式注入）
+    parts = []
+
+    if ctx_prompt:
+        parts.append(ctx_prompt)
+
+    parts.append("【当前屏幕状态】")
+    parts.append(f"场景类型：{scene_type}")
+    if desc:
+        parts.append(f"画面描述：{desc}")
+    if game_name:
+        line = f"游戏名称：{game_name}"
+        if game_genre:
+            line += f"，类型：{game_genre}"
+        parts.append(line)
+    parts.append(f"置信度：{confidence}")
+
+    # 认知置信度约束（设计文档 § 12）
+    if confidence == "high" and game_name:
+        parts.append("（可以自由调用游戏知识评论策略、机制、角色）")
+    elif game_genre:
+        parts.append("（只描述直观可见内容，可基于游戏类型做通用评论，不假设具体机制）")
+    else:
+        parts.append("（只做基础陪伴式评论，不评论具体策略或机制）")
+
+    if instruction:
+        parts.append(f"\n{instruction}")
+
+    # 关键约束：强制针对具体游戏画面内容发言，禁止泛泛而谈
+    if scene_type == "game":
+        parts.append(
+            "\n【发言要求】你必须针对上方「画面描述」中的具体内容说话，"
+            "例如评论刚才发生的战斗细节、可见的血量/分数/手牌/技能、当前局面的好坏等。"
+            "严禁说「你在玩游戏呢」「又在打游戏」「在玩某某游戏」这类废话，"
+            "要像一个坐在旁边一起看的朋友，对画面有具体的、实质性的反应和评论。"
+        )
+
+    vision_context = "\n".join(parts)
+
+    from datetime import datetime
+    _weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+    _now = datetime.now()
+    _time_str = _now.strftime("%Y-%m-%d %H:%M") + f"（{_weekdays[_now.weekday()]}）"
+    time_note = f"【当前时间】{_time_str}"
+
+    full_system = system_prompt + "\n\n" + time_note + "\n\n" + vision_context
+
+    return [
+        {"role": "system",    "content": full_system},
+        {"role": "user",      "content": "（请根据上述屏幕内容，以你的性格和口吻自然地说几句话）"},
+    ]
+
+
+def build_screenshot_messages(
+    system_prompt: str,
+    history: list[dict],
+    user_message: str,
+    screenshot_info: dict,
+    window_index: int = DEFAULT_WINDOW_INDEX,
+    character_id: str = "",
+    character_name: str = "",
+    relevant_summaries: Optional[list[str]] = None,
+) -> list[dict]:
+    """
+    用户主动请求观察屏幕时，将截图分析结果注入对话上下文后重新组装 messages。
+
+    screenshot_info: VisionSystem.capture_for_user() 的返回值
+    """
+    trimmed = trim_history(history, window_index)
+    clean_history = [
+        {"role": msg["role"], "content": msg["content"]}
+        for msg in trimmed
+    ]
+
+    memory_layer = _build_memory_layer(
+        character_id=character_id,
+        character_name=character_name,
+        relevant_summaries=relevant_summaries or [],
+    )
+
+    from datetime import datetime
+    _weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+    _now = datetime.now()
+    _time_str = _now.strftime("%Y-%m-%d %H:%M") + f"（{_weekdays[_now.weekday()]}）"
+    time_note = f"【当前时间】{_time_str}"
+
+    full_system = system_prompt + "\n\n" + time_note
+    if memory_layer:
+        full_system += "\n\n" + memory_layer
+
+    # 组装截图分析结果
+    scene_type  = screenshot_info.get("scene_type", "unknown")
+    desc        = screenshot_info.get("scene_description", "无法识别画面内容")
+    game_name   = screenshot_info.get("game_name")
+    game_genre  = screenshot_info.get("game_genre")
+    confidence  = screenshot_info.get("confidence", "low")
+
+    screen_ctx_parts = [f"【屏幕分析结果】\n场景：{scene_type}，{desc}"]
+    if game_name:
+        line = f"游戏：{game_name}"
+        if game_genre:
+            line += f"（{game_genre}）"
+        screen_ctx_parts.append(line)
+    screen_ctx_parts.append(f"置信度：{confidence}")
+    screen_context = "\n".join(screen_ctx_parts)
+
+    # 将用户原始消息 + 截图结果合并
+    combined_user_msg = f"{user_message}\n\n{screen_context}"
+
+    messages = [{"role": "system", "content": full_system}]
+    messages.extend(clean_history)
+    messages.append({"role": "user", "content": combined_user_msg})
+    return messages
+
+
 def _build_memory_layer(
     character_id: str,
     character_name: str,
