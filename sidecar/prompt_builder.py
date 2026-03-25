@@ -266,6 +266,15 @@ def build_vision_speech_messages(
     if instruction:
         parts.append(f"\n{instruction}")
 
+    # 关键约束：强制针对具体游戏画面内容发言，禁止泛泛而谈
+    if scene_type == "game":
+        parts.append(
+            "\n【发言要求】你必须针对上方「画面描述」中的具体内容说话，"
+            "例如评论刚才发生的战斗细节、可见的血量/分数/手牌/技能、当前局面的好坏等。"
+            "严禁说「你在玩游戏呢」「又在打游戏」「在玩某某游戏」这类废话，"
+            "要像一个坐在旁边一起看的朋友，对画面有具体的、实质性的反应和评论。"
+        )
+
     vision_context = "\n".join(parts)
 
     from datetime import datetime

@@ -179,6 +179,12 @@ class VisionSystem:
                 confidence="high",
                 source="pixel_skip",
             )
+            threshold = self.speech_engine._get_threshold()
+            print(
+                f"[Vision] ⏭ 跳过VLM（像素差={pixel_diff:.1f}%）"
+                f" 兴趣分: +1 → 累计={self.event_buffer.accumulated_score}/{threshold}"
+                f" 场景={self.scene_manager.current_scene_type}"
+            )
             await self._check_speech()
             return
 
@@ -207,7 +213,7 @@ class VisionSystem:
         )
 
         if vlm_result is None:
-            print("[Vision] VLM 调用失败，跳过本帧")
+            print(f"[Vision] ❌ VLM 调用失败（像素差={pixel_diff:.1f}%, 窗口={window_title[:30]}），跳过本帧")
             return
 
         # ─ 9. 游戏检测（结合进程信息 + VLM 结果）──────────────
@@ -234,6 +240,15 @@ class VisionSystem:
             confidence=vlm_result.confidence,
             source="vlm_background",
         )
+        threshold = self.speech_engine._get_threshold()
+        game_str = f"《{vlm_result.game_name}》" if vlm_result.game_name else ""
+        print(
+            f"[Vision] 🔍 VLM分析（像素差={pixel_diff:.1f}%，{prompt_type}）"
+            f" 场景={vlm_result.scene_type}{game_str}"
+            f" 置信={vlm_result.confidence}"
+            f" 兴趣分: +{vlm_result.interest_score} → 累计={self.event_buffer.accumulated_score}/{threshold}"
+            f"\n         描述: {vlm_result.scene_description[:80]}"
+        )
 
         # ─ 12. 发言决策 ─────────────────────────────────────────
         await self._check_speech()
@@ -249,6 +264,7 @@ class VisionSystem:
         )
 
         if trigger is not None:
+            print(f"[Vision] 💬 触发主动发言！原因={trigger.reason} 场景={scene_info.get('scene_type')} 游戏={scene_info.get('game_name')}")
             # 标记事件已消费，重置兴趣分
             consumed_events = self.event_buffer.consume_all()
             self.event_buffer.reset_score()

@@ -200,6 +200,7 @@ def get_messages_page(
             MessageType.USER_TEXT.value,
             MessageType.USER_VOICE.value,
             MessageType.AI_REPLY.value,
+            MessageType.GAME_EVENT.value,   # Phase 3: 视觉感知主动发言
         ]
     placeholders = ",".join("?" for _ in types)
     conditions.append(f"type IN ({placeholders})")
@@ -345,41 +346,35 @@ def search_messages(
     """
     conn = get_conn()
 
+    _search_types = (
+        MessageType.USER_TEXT.value,
+        MessageType.USER_VOICE.value,
+        MessageType.AI_REPLY.value,
+        MessageType.GAME_EVENT.value,   # Phase 3: 视觉感知主动发言
+    )
+
     if character_id is not None:
         rows = conn.execute(
             """
             SELECT * FROM messages
             WHERE content LIKE ?
               AND character_id = ?
-              AND type IN (?, ?, ?)
+              AND type IN (?, ?, ?, ?)
             ORDER BY timestamp DESC
             LIMIT ?
             """,
-            (
-                f"%{keyword}%",
-                character_id,
-                MessageType.USER_TEXT.value,
-                MessageType.USER_VOICE.value,
-                MessageType.AI_REPLY.value,
-                limit,
-            ),
+            (f"%{keyword}%", character_id, *_search_types, limit),
         ).fetchall()
     else:
         rows = conn.execute(
             """
             SELECT * FROM messages
             WHERE content LIKE ?
-              AND type IN (?, ?, ?)
+              AND type IN (?, ?, ?, ?)
             ORDER BY timestamp DESC
             LIMIT ?
             """,
-            (
-                f"%{keyword}%",
-                MessageType.USER_TEXT.value,
-                MessageType.USER_VOICE.value,
-                MessageType.AI_REPLY.value,
-                limit,
-            ),
+            (f"%{keyword}%", *_search_types, limit),
         ).fetchall()
 
     return [_row_to_message(r) for r in rows]

@@ -54,6 +54,10 @@ class SpeechEngine:
     def set_cooldown(self, seconds: float):
         self._cooldown_seconds = max(5.0, float(seconds))
 
+    def _get_threshold(self) -> int:
+        """返回当前话痨档位对应的兴趣分阈值（供日志使用）"""
+        return INTEREST_THRESHOLDS[self._talk_level]
+
     # ── 用户交互状态 ────────────────────────────────────────────
 
     def set_user_interacting(self, interacting: bool):
