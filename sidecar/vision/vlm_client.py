@@ -41,7 +41,7 @@ class VLMResult:
 # ── 默认 VLM 配置 ────────────────────────────────────────────────
 
 DEFAULT_VLM_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/"
-DEFAULT_VLM_MODEL    = "glm-4v-flash"
+DEFAULT_VLM_MODEL    = "glm-4.6v-flash"
 
 
 # ── Prompt 模板（改进版）─────────────────────────────────────────
@@ -104,6 +104,7 @@ MOBA、回合制策略、动作冒险、格斗、音乐节奏、塔防、\
 2. 如果你无法确定场景类型，请将 scene_type 设为 "unknown"，confidence 设为 "low"。宁可不确定，也不要猜测。
 3. scene_description 必须是纯字符串，不要返回嵌套的 JSON 对象或数组。
 4. 不要假设画面中的操作主体就是用户。如果画面显示的是死亡画面、回放、观战，请在 player_state 和 scene_description 中如实说明。
+5. 截图中可能会出现一个桌面宠物（Live2D 角色，通常在屏幕边缘），这不是游戏或应用的一部分，请完全忽略它，不要在描述中提及。
 
 只返回 JSON，不要任何其他文字。"""
 
@@ -141,8 +142,15 @@ _INCREMENTAL_PROMPT = """\
 请分析当前帧，以 JSON 格式返回（只需以下字段，其余沿用上次）：
 
 - confidence：high / medium / low
-- interest_score：1~15 的整数
-  评分参考：1=无变化，3=普通变化，6=激烈战斗/技能爆发，10+=极度精彩
+- interest_score：相对于上一帧的变化程度（1~15 的整数）
+  评分参考：
+    1 = 画面与上次基本相同，无明显变化
+    3 = 画面有轻微变化（角色移动、普通操作）
+    5 = 发生了值得注意的事件（击杀、被击杀、技能释放）
+    8 = 重大事件（连杀、boss出现、团战爆发）
+    10+ = 极其罕见的精彩时刻
+  注意：持续的战斗画面如果和上一帧差不多，应该评 1-3 分，
+  不要因为"画面里有战斗"就一直给高分。只有新发生的事件才应该高分。
 - player_state：playing / spectating / in_menu / cutscene / waiting / unknown
 - scene_description：**纯字符串**，2~3句描述当前画面
 - scene_facts：字符串数组，列出关键事实
@@ -154,6 +162,9 @@ _INCREMENTAL_PROMPT = """\
   其他情况返回 false
 
 重要：scene_description 必须是纯字符串。不要假设画面中操作主体就是用户。
+重要：如果当前画面与你上次描述的场景基本相同（同一个界面、同一场战斗、同样的元素），
+请将 scene_description 填写为"画面无明显变化"，interest_score 填 1。
+不要用不同的措辞重复描述已经描述过的内容。只有画面中发生了新的事件或出现了新的变化时，才需要详细描述。
 
 只返回 JSON，不要任何其他文字。"""
 
@@ -434,7 +445,7 @@ class VLMClient:
                         {"type": "image_url", "image_url": {"url": img_url}},
                     ],
                 }],
-                max_tokens=500,   # 改进：从 300 提高到 500，因为新增了 scene_facts 等字段
+                max_tokens=1200,   # 改进：从 300 提高到 500，因为新增了 scene_facts 等字段
                 temperature=0.1,
             )
             raw = response.choices[0].message.content.strip()
@@ -447,14 +458,28 @@ class VLMClient:
         """按优先级选择 VLM 客户端"""
         from openai import AsyncOpenAI
 
-        # ① 专用 VLM
-        if self._vlm_api_key:
-            client = AsyncOpenAI(api_key=self._vlm_api_key, base_url=self._vlm_base_url)
-            return client, self._vlm_model
+        print(f"[VLM选择] vlm_model={self._vlm_model}, vlm_base_url={self._vlm_base_url[:30]}...")
+        print(f"[VLM选择] vlm_api_key={'有' if self._vlm_api_key else '无'}")
+        print(f"[VLM选择] main_model={self._main_model}, main_client={'有' if self._main_client else '无'}")
+        print(f"[VLM选择] main_is_multimodal={self._main_is_multimodal()}")
 
-        # ② 主模型（若多模态）
+        _is_default_vlm = (
+            self._vlm_model == DEFAULT_VLM_MODEL
+            and self._vlm_base_url == DEFAULT_VLM_BASE_URL
+        )
+
+        # 情况1：用户单独配置了非默认 VLM → 优先用它
+        if self._vlm_api_key and not _is_default_vlm:
+           client = AsyncOpenAI(api_key=self._vlm_api_key, base_url=self._vlm_base_url)
+           return client, self._vlm_model
+
+        # 情况2：主模型支持多模态 → 用主模型（免去额外 VLM 开销）
         if self._main_client and self._main_is_multimodal():
             return self._main_client, self._main_model
 
-        # ③ 兜底不可用
+        # 情况3：兜底用默认 VLM（需要有 Key）
+        if self._vlm_api_key:
+           client = AsyncOpenAI(api_key=self._vlm_api_key, base_url=self._vlm_base_url)
+           return client, self._vlm_model
+
         return None, None

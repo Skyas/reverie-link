@@ -59,7 +59,7 @@ class CaptureStrategy:
         self._total_vlm_calls += 1
         self._vlm_calls_this_minute += 1
         self._last_vlm_time = time.time()
-        if interest_score <= 2:
+        if interest_score <= 3:
             self._boring_streak += 1
         else:
             self._boring_streak = 0
