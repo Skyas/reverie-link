@@ -315,10 +315,18 @@ async def _drain_vision_speech(
             character_id=session_character_id,
             character_name=character_name,
         )
-        response = await llm_client.chat.completions.create(
-            model=llm_model, messages=messages, max_tokens=100, temperature=0.9,
-        )
+        try:
+            response = await llm_client.chat.completions.create(
+                model=llm_model, messages=messages,
+                max_completion_tokens=200, temperature=0.9,
+            )
+        except Exception:
+            response = await llm_client.chat.completions.create(
+                model=llm_model, messages=messages,
+                max_tokens=200, temperature=0.9,
+            )
         reply = response.choices[0].message.content.strip()
+        print(f"[Vision] LLM回复（finish_reason={response.choices[0].finish_reason}）: {reply[:50]}")
     except Exception as e:
         print(f"[Vision] 主动发言 LLM 调用失败: {e}")
         return
@@ -545,7 +553,7 @@ async def websocket_chat(websocket: WebSocket):
                     del session_messages[:evicted_count]
 
             try:
-                response = await llm_client.chat.completions.create(model=LLM_MODEL, messages=messages, max_tokens=150, temperature=0.85)
+                response = await llm_client.chat.completions.create(model=LLM_MODEL, messages=messages, max_tokens=300, temperature=0.85)
                 reply = response.choices[0].message.content.strip()
             except Exception as e:
                 err_str = str(e)
@@ -582,7 +590,7 @@ async def websocket_chat(websocket: WebSocket):
                     try:
                         response2 = await llm_client.chat.completions.create(
                             model=LLM_MODEL, messages=messages_with_screen,
-                            max_tokens=150, temperature=0.85,
+                            max_tokens=300, temperature=0.85,
                         )
                         reply = response2.choices[0].message.content.strip()
                     except Exception:

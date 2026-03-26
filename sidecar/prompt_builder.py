@@ -17,6 +17,7 @@ import random
 import time
 import sys
 import os
+
 # 允许从 prompt_builder 访问 memory 模块（两者同在 sidecar/ 下）
 _SIDECAR_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SIDECAR_DIR not in sys.path:
@@ -385,6 +386,16 @@ def build_vision_speech_messages(
     time_note = _build_time_note()
 
     full_system = system_prompt + "\n\n" + time_note
+    if memory_layer:
+        full_system += "\n\n" + memory_layer
+
+    # 主动发言时移除 [NEED_SCREENSHOT] 相关指令（已经在看屏幕了）
+    full_system = re.sub(
+        r'\n【屏幕观察】.*?\[NEED_SCREENSHOT\].*?。',
+        '',
+        full_system,
+        flags=re.DOTALL,
+    )
     if memory_layer:
         full_system += "\n\n" + memory_layer
 
