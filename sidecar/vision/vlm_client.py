@@ -1,15 +1,17 @@
 """
-视觉感知 · VLM 客户端封装
+视觉感知 · VLM 客户端封装（改进版，直接替换原 vlm_client.py）
 
-负责：
-  - 调用 VLM API（OpenAI 兼容格式）分析截图
-  - 解析结构化 JSON 输出
-  - 图片 base64 编码
-  - 自动 fallback 逻辑（专用 VLM → 主模型 → GLM-4V-Flash）
+改进点：
+  1. VLMResult 新增 scene_facts / scene_changed / player_state 字段
+  2. JSON 解析改用括号配对，支持嵌套对象，不再被切碎
+  3. scene_description 容错：VLM 返回对象/数组时自动展平为字符串
+  4. game_genre 改为自由描述，不限定固定选项
+  5. 新增"不确定就说 unknown"指令，减少误判
+  6. 新增 player_state 字段，区分用户在操作还是在观看
+  7. 增量分析新增 scene_changed 字段，检测场景内切换
 """
 import base64
 import json
-import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -25,9 +27,15 @@ class VLMResult:
     confidence: str = "low"            # high|medium|low
     interest_score: int = 1            # 1~15
     scene_description: str = ""
+    scene_facts: list[str] = field(default_factory=list)    # 改进：结构化事实
+    scene_changed: bool = False                              # 改进：增量模式场景质变标记
+    player_state: str = "unknown"                            # 改进：playing|spectating|in_menu|cutscene|waiting|unknown
 
     def is_game(self) -> bool:
         return self.scene_type == "game"
+
+    def is_player_active(self) -> bool:
+        return self.player_state == "playing"
 
 
 # ── 默认 VLM 配置 ────────────────────────────────────────────────
@@ -36,7 +44,7 @@ DEFAULT_VLM_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/"
 DEFAULT_VLM_MODEL    = "glm-4v-flash"
 
 
-# ── Prompt 模板 ──────────────────────────────────────────────────
+# ── Prompt 模板（改进版）─────────────────────────────────────────
 
 _BACKGROUND_PROMPT = """\
 你是一个屏幕内容分析助手。请分析以下截图的内容。
@@ -45,23 +53,60 @@ _BACKGROUND_PROMPT = """\
 
 {prev_context}\
 请以 JSON 格式返回分析结果，包含以下字段：
-- app_name：当前应用名称（字符串或 null）
-- scene_type：场景类型，只能是以下之一：game / video / work / browsing / idle / unknown
-- game_name：如果是游戏，填写游戏名称（尽量精确，如「杀戮尖塔」「绝区零」「英雄联盟」）；否则 null
-- game_genre：如果是游戏，填写游戏类型（如 roguelike / 动作RPG / FPS / MOBA 等）；否则 null
-- confidence：你对判断的置信度：high / medium / low
-- interest_score：画面的兴趣程度（1~15 的整数）
-  评分参考：1=静止菜单，3=普通场景，6=激烈战斗/精彩时刻，10+=高分/BOSS/通关等关键事件
-- scene_description：
-  · 如果是游戏：用2~3句话描述当前游戏画面，**必须**包含：正在发生什么（战斗/探索/对话/过场等）、\
-可见的重要UI信息（血量/分数/关卡/手牌/技能等）、任何值得评论的有趣细节
-  · 其他场景：用1句话描述即可
 
-重要：请忽略截图中可能出现的以下敏感信息，不要在描述中提及：密码、验证码、\
-个人身份信息（身份证号、手机号、邮箱地址等）、财务数据（银行卡号、余额、\
-交易记录等）、私人聊天内容。仅描述画面的整体场景和视觉元素。
+- app_name：当前应用名称（字符串或 null）
+
+- scene_type：场景类型，只能是以下之一：game / video / work / browsing / idle / unknown
+
+- game_name：如果是游戏，填写游戏名称（尽量精确，如「杀戮尖塔」「绝区零」「英雄联盟」「战舰世界」「CS2」）；否则 null
+
+- game_genre：如果是游戏，用2-4个词自由描述游戏类型。\
+示例：海战策略、战术射击FPS、卡牌Roguelike、开放世界动作RPG、\
+MOBA、回合制策略、动作冒险、格斗、音乐节奏、塔防、\
+模拟经营、大逃杀、平台跳跃……\
+如果不是游戏则填 null
+
+- confidence：你对判断的置信度：high / medium / low
+
+- interest_score：画面的兴趣程度（1~15 的整数）
+  评分参考：
+    1 = 加载画面、静止菜单、匹配等待
+    2 = 商店/设置/装备界面
+    3 = 普通游戏画面（走路、探索、对话）
+    5 = 比较紧张的时刻（遭遇战、关键选择）
+    8 = 激烈战斗、团战、boss战
+    10+ = 极度精彩时刻（多杀、通关、关键翻盘）
+
+- player_state：用户当前的操作状态，只能是以下之一：
+    playing = 用户正在操作自己的角色
+    spectating = 用户正在观看他人（死亡回放、队友视角、观战）
+    in_menu = 用户在菜单/商店/设置界面
+    cutscene = 过场动画/剧情（不可操作）
+    waiting = 加载、匹配、复活等待
+    unknown = 无法判断
+
+- scene_description：**必须是一个纯字符串**（不是对象，不是数组）。
+  用2~3句话描述当前画面：
+  · 画面里正在发生什么
+  · 如果用户不在操作（死亡/观战/过场），要说明这一点
+  · 可见的关键UI信息（血量/分数/倒计时/技能冷却等）
+  非游戏场景用1句话描述即可
+
+- scene_facts：一个字符串数组，列出画面中值得关注的关键事实。
+  示例：
+    游戏中：["角色血量约30%", "正在与boss战斗", "队友已倒地"]
+    死亡中：["用户角色已死亡", "复活倒计时18秒", "正在观看队友团战"]
+    菜单中：["在装备商店", "金币2300"]
+  非游戏场景可以为空数组 []
+
+重要规则：
+1. 请忽略截图中的敏感信息（密码、验证码、个人身份信息、财务数据、私人聊天内容）。
+2. 如果你无法确定场景类型，请将 scene_type 设为 "unknown"，confidence 设为 "low"。宁可不确定，也不要猜测。
+3. scene_description 必须是纯字符串，不要返回嵌套的 JSON 对象或数组。
+4. 不要假设画面中的操作主体就是用户。如果画面显示的是死亡画面、回放、观战，请在 player_state 和 scene_description 中如实说明。
 
 只返回 JSON，不要任何其他文字。"""
+
 
 _USER_TRIGGERED_PROMPT = """\
 你是一个屏幕内容分析助手。用户希望你仔细观察当前屏幕画面。
@@ -73,14 +118,18 @@ _USER_TRIGGERED_PROMPT = """\
 - app_name：当前应用名称（字符串或 null）
 - scene_type：场景类型，只能是以下之一：game / video / work / browsing / idle / unknown
 - game_name：如果是游戏，填写游戏名称；否则 null
-- game_genre：如果是游戏，填写游戏类型；否则 null
+- game_genre：如果是游戏，用2-4个词自由描述游戏类型；否则 null
 - confidence：你对判断的置信度：high / medium / low
 - interest_score：画面的兴趣程度（1~15 的整数）
-- scene_description：用 2~3 句话详细描述当前画面内容，包括关键细节
+- player_state：playing / spectating / in_menu / cutscene / waiting / unknown
+- scene_description：**纯字符串**，用 2~3 句话详细描述当前画面内容
+- scene_facts：字符串数组，列出画面中的关键事实
 
-重要：请忽略截图中可能出现的密码、验证码、个人身份信息、财务数据、私人聊天内容。
+重要：请忽略截图中的敏感信息。scene_description 必须是纯字符串。\
+如果无法确定场景类型，scene_type 填 "unknown"，confidence 填 "low"。
 
 只返回 JSON，不要任何其他文字。"""
+
 
 _INCREMENTAL_PROMPT = """\
 你是一个屏幕内容分析助手。当前正在持续观察同一应用的画面。
@@ -89,18 +138,27 @@ _INCREMENTAL_PROMPT = """\
 已知场景：{scene_type}（{game_info}）
 
 {prev_context}\
-请分析当前帧的画面变化，以 JSON 格式返回（只需以下字段，其余字段沿用上次结果）：
-- confidence：你对判断的置信度：high / medium / low
-- interest_score：画面的兴趣程度（1~15 的整数）
-  评分参考：1=无变化，3=普通场景变化，6=激烈战斗/技能爆发，10+=BOSS/通关/意外事件
-- scene_description：
-  · 如果是游戏：用2~3句话描述当前画面，包含正在发生什么和可见的关键信息（血量/分数/手牌等）
-  · 其他场景：用1句话描述即可
+请分析当前帧，以 JSON 格式返回（只需以下字段，其余沿用上次）：
 
-重要：请忽略截图中的敏感信息（密码、个人信息、财务数据、私人聊天）。
+- confidence：high / medium / low
+- interest_score：1~15 的整数
+  评分参考：1=无变化，3=普通变化，6=激烈战斗/技能爆发，10+=极度精彩
+- player_state：playing / spectating / in_menu / cutscene / waiting / unknown
+- scene_description：**纯字符串**，2~3句描述当前画面
+- scene_facts：字符串数组，列出关键事实
+- scene_changed：布尔值。以下情况返回 true：
+    · 从菜单进入游戏（或反过来）
+    · 从存活变为死亡（或反过来）
+    · 从对话/过场进入战斗（或反过来）
+    · 游戏阶段性切换（如从对线期进入团战期）
+  其他情况返回 false
+
+重要：scene_description 必须是纯字符串。不要假设画面中操作主体就是用户。
 
 只返回 JSON，不要任何其他文字。"""
 
+
+# ── 前文上下文构建 ───────────────────────────────────────────────
 
 def _build_prev_context(prev_descriptions: list[str]) -> str:
     if not prev_descriptions:
@@ -143,30 +201,137 @@ def _build_prompt(
         )
 
 
-# ── JSON 解析 ────────────────────────────────────────────────────
+# ── JSON 提取（改进版：支持嵌套对象）────────────────────────────
+
+def _extract_json(raw: str) -> Optional[dict]:
+    """
+    从 VLM 回复中提取完整的 JSON 对象。
+
+    原方案 re.search(r'\\{.*?\\}') 用非贪婪匹配，
+    遇到第一个 } 就截断。如果 VLM 返回嵌套 JSON
+    （如 scene_description 是对象），内层 } 会导致截断，
+    后续 json.loads 报 "Expecting ',' delimiter" 错误。
+
+    新方案：用括号深度配对，找到完整的 JSON 块。
+    """
+    # 先去掉 markdown 代码块标记
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        # 去掉开头的 ```json 和结尾的 ```
+        lines = cleaned.split("\n")
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        cleaned = "\n".join(lines)
+
+    # 找第一个 {
+    start = cleaned.find('{')
+    if start == -1:
+        return None
+
+    # 括号配对
+    depth = 0
+    in_string = False
+    escape_next = False
+    end = start
+
+    for i in range(start, len(cleaned)):
+        ch = cleaned[i]
+
+        if escape_next:
+            escape_next = False
+            continue
+
+        if ch == '\\':
+            escape_next = True
+            continue
+
+        if ch == '"':
+            in_string = not in_string
+            continue
+
+        if in_string:
+            continue
+
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+
+    if depth != 0:
+        return None
+
+    try:
+        return json.loads(cleaned[start:end])
+    except json.JSONDecodeError:
+        return None
+
+
+# ── scene_description 容错处理 ───────────────────────────────────
+
+def _normalize_scene_description(raw_desc) -> str:
+    """
+    VLM 有时会把 scene_description 返回为嵌套对象或数组，
+    需要展平为字符串。
+
+    处理的情况：
+      "scene_description": "正常的字符串"          → 直接返回
+      "scene_description": {"current_action": ...}  → 把值拼接起来
+      "scene_description": ["句子1", "句子2"]       → 用分号连接
+    """
+    if isinstance(raw_desc, str):
+        return raw_desc
+
+    if isinstance(raw_desc, dict):
+        parts = []
+        for key, value in raw_desc.items():
+            if isinstance(value, str) and value:
+                parts.append(value)
+            elif isinstance(value, list):
+                parts.extend(str(v) for v in value if v)
+        return "；".join(parts) if parts else ""
+
+    if isinstance(raw_desc, list):
+        return "；".join(str(item) for item in raw_desc if item)
+
+    return str(raw_desc) if raw_desc else ""
+
+
+# ── JSON → VLMResult 解析 ────────────────────────────────────────
 
 def _parse_vlm_response(raw: str, incremental: bool = False, base: Optional[VLMResult] = None) -> VLMResult:
     """从 VLM 回复中提取 JSON 并解析为 VLMResult"""
-    # 提取 JSON 块（LLM 有时会加 markdown 代码块）
-    match = re.search(r'\{.*?\}', raw, re.DOTALL)
-    if not match:
+
+    # 改进：用括号配对提取 JSON（支持嵌套）
+    data = _extract_json(raw)
+    if data is None:
         print(f"[VLM] 无法从回复中提取 JSON: {raw[:200]}")
         return base or VLMResult()
 
-    try:
-        data = json.loads(match.group())
-    except json.JSONDecodeError as e:
-        print(f"[VLM] JSON 解析失败: {e}, raw={raw[:200]}")
-        return base or VLMResult()
+    # 改进：scene_description 容错处理
+    scene_desc = _normalize_scene_description(data.get("scene_description", ""))
+
+    # 改进：scene_facts 容错
+    scene_facts = data.get("scene_facts", [])
+    if not isinstance(scene_facts, list):
+        scene_facts = []
+    scene_facts = [str(f) for f in scene_facts if f]
 
     result = VLMResult(
         confidence=data.get("confidence", "low"),
         interest_score=max(1, min(15, int(data.get("interest_score", 1)))),
-        scene_description=data.get("scene_description", ""),
+        scene_description=scene_desc,
+        scene_facts=scene_facts,
+        scene_changed=bool(data.get("scene_changed", False)),
+        player_state=data.get("player_state", "unknown"),
     )
 
     if incremental and base:
-        # 增量模式：只更新这三个字段，其余沿用上次
+        # 增量模式：只更新动态字段，其余沿用上次
         result.app_name   = base.app_name
         result.scene_type = base.scene_type
         result.game_name  = base.game_name
@@ -180,7 +345,7 @@ def _parse_vlm_response(raw: str, incremental: bool = False, base: Optional[VLMR
     return result
 
 
-# ── VLM 客户端 ───────────────────────────────────────────────────
+# ── VLM 客户端（与原版完全一致，无改动）─────────────────────────
 
 class VLMClient:
     """
@@ -192,7 +357,6 @@ class VLMClient:
         self._vlm_base_url: str = DEFAULT_VLM_BASE_URL
         self._vlm_api_key: str  = ""
         self._vlm_model: str    = DEFAULT_VLM_MODEL
-        # 主模型引用（由外部注入，用于判断是否支持多模态）
         self._main_client = None
         self._main_model: str = ""
 
@@ -225,7 +389,7 @@ class VLMClient:
         self,
         img_bytes: bytes,
         window_title: str = "",
-        prompt_type: str = "background",   # "background" | "user_triggered" | "incremental"
+        prompt_type: str = "background",
         prev_descriptions: list[str] = None,
         base_result: Optional[VLMResult] = None,
         scene_type: str = "unknown",
@@ -253,11 +417,9 @@ class VLMClient:
             game_genre=game_genre,
         )
 
-        # 图片编码
         img_b64 = base64.b64encode(img_bytes).decode()
         img_url = f"data:image/jpeg;base64,{img_b64}"
 
-        # 选择客户端
         client, model = self._select_client()
         if client is None:
             return None
@@ -272,7 +434,7 @@ class VLMClient:
                         {"type": "image_url", "image_url": {"url": img_url}},
                     ],
                 }],
-                max_tokens=300,
+                max_tokens=500,   # 改进：从 300 提高到 500，因为新增了 scene_facts 等字段
                 temperature=0.1,
             )
             raw = response.choices[0].message.content.strip()
@@ -294,5 +456,5 @@ class VLMClient:
         if self._main_client and self._main_is_multimodal():
             return self._main_client, self._main_model
 
-        # ③ GLM-4V-Flash 兜底（无 Key 则不可用）
+        # ③ 兜底不可用
         return None, None

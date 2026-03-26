@@ -1,11 +1,10 @@
 """
-视觉感知 · 事件缓冲池
+视觉感知 · 事件缓冲池（改进版，直接替换原 event_buffer.py）
 
-负责：
-  - 存储每帧分析产生的视觉事件
-  - 累积兴趣分
-  - 管理事件生命周期（consumed / unconsumed）
-  - 为发言生成提供上下文摘要
+改进点：
+  1. 新增 add_score() 方法：只累加兴趣分，不创建事件。
+     用于 pixel_skip / static_frame 等无 VLM 分析的帧，
+     避免产生大量空描述事件污染聊天 AI 的上下文。
 """
 import random
 import time
@@ -57,6 +56,24 @@ class EventBuffer:
     @property
     def accumulated_score(self) -> int:
         return self._accumulated_score
+
+    # ── 改进：只加分不加事件 ─────────────────────────────────────
+
+    def add_score(self, score: int):
+        """
+        只累加兴趣分，不创建事件。
+
+        用于 pixel_skip / static_frame 等无 VLM 分析的帧。
+        这些帧没有 scene_description，如果也 push 进事件列表，
+        会产生大量 "[14:02:30] 无描述（兴趣分 +1）" 的垃圾条目，
+        污染 build_context_prompt() 输出给聊天 AI 的上下文。
+
+        只加分可以正常推进发言触发（兴趣分累积），
+        同时保持上下文干净（只包含有实际描述的 VLM 事件）。
+        """
+        self._accumulated_score += score
+
+    # ── 以下与原版完全一致 ───────────────────────────────────────
 
     def push(
         self,
