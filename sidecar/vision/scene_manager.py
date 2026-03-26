@@ -111,36 +111,36 @@ class SceneManager:
 
     # ── 场景自适应参数 ──────────────────────────────────────────
 
-    def get_scene_prompt_info(self, address: str = "你") -> dict:
-        """
-        返回场景相关的 Prompt 注入信息。
-        """
-        result = self._current_result
-        if result is None:
-            return {
-                "scene_type": "unknown",
-                "scene_description": "",
-                "game_name": None,
-                "game_genre": None,
-                "confidence": "low",
-                "scene_instruction": f"{address}好像不在屏幕前，你可以自言自语或表达等待的情绪。",
-            }
+    # def get_scene_prompt_info(self, address: str = "你") -> dict:
+    #     """
+    #     返回场景相关的 Prompt 注入信息。
+    #     """
+    #     result = self._current_result
+    #     if result is None:
+    #         return {
+    #             "scene_type": "unknown",
+    #             "scene_description": "",
+    #             "game_name": None,
+    #             "game_genre": None,
+    #             "confidence": "low",
+    #             "scene_instruction": f"{address}好像不在屏幕前，你可以自言自语或表达等待的情绪。",
+    #         }
 
-        scene_type = result.scene_type
-        instructions = {
-            "game":     f"你正在观看{address}玩游戏，可以评论游戏画面、提供策略建议或表达情绪反应。",
-            "video":    f"你注意到{address}正在看视频，可以偶尔对画面内容做轻松的反应。",
-            "work":     f"你注意到{address}正在工作，不要评论工作内容，只做关怀式提醒，比如提醒休息、喝水。",
-            "browsing": f"你注意到{address}正在浏览网页，可以轻松地聊几句。",
-            "idle":     f"{address}好像不在屏幕前，你可以自言自语或表达等待的情绪。",
-            "unknown":  f"{address}好像不在屏幕前，你可以自言自语或表达等待的情绪。",
-        }
+    #     # scene_type = result.scene_type
+    #     # instructions = {
+    #     #     "game":     f"你正在观看{address}玩游戏，可以评论游戏画面、提供策略建议或表达情绪反应。",
+    #     #     "video":    f"你注意到{address}正在看视频，可以偶尔对画面内容做轻松的反应。",
+    #     #     "work":     f"你注意到{address}正在工作，不要评论工作内容，只做关怀式提醒，比如提醒休息、喝水。",
+    #     #     "browsing": f"你注意到{address}正在浏览网页，可以轻松地聊几句。",
+    #     #     "idle":     f"{address}好像不在屏幕前，你可以自言自语或表达等待的情绪。",
+    #     #     "unknown":  f"{address}好像不在屏幕前，你可以自言自语或表达等待的情绪。",
+    #     # }
 
-        return {
-            "scene_type":        scene_type,
-            "scene_description": result.scene_description,
-            "game_name":         result.game_name,
-            "game_genre":        result.game_genre,
-            "confidence":        result.confidence,
-            "scene_instruction": instructions.get(scene_type, instructions["unknown"]),
-        }
+    #     return {
+    #         "scene_type":        scene_type,
+    #         "scene_description": result.scene_description,
+    #         "game_name":         result.game_name,
+    #         "game_genre":        result.game_genre,
+    #         "confidence":        result.confidence,
+    #         "scene_instruction": instructions.get(scene_type, instructions["unknown"]),
+    #     }
