@@ -68,6 +68,155 @@
     let live2dContainer: PIXI.Container | null = null;
     let renderTexture: PIXI.RenderTexture | null = null;
 
+    // ── 帧切换参数保护系统 ──────────────────────────────────────
+    // 某些手绘线稿模型（如 MO）用 stepped 插值在 0/1 之间跳变来切换帧。
+    // pixi-live2d-display 有两个机制会破坏这种跳变：
+    //   1. motion crossfade：loop 重启时新旧动作权重混合，stepped 值被线性插值
+    //   2. 物理引擎：对同组参数做惯性平滑
+    // 两者都导致参数值停在中间（0.4~0.8），多帧线稿同时半透明叠加 = 白色/闪烁。
+    //
+    // 解决方案（双保险）：
+    //   A. 模型加载后，将所有 idle motion 实例的 fadeIn/fadeOut 权重设为 0（消除 crossfade）
+    //   B. 每帧渲染前，将 stepped 参数强制二值化（消除残留平滑）
+    //
+    // 自动检测：解析 idle motion 文件的 Segments，
+    // 查找 stepped 插值（type 2）的参数——只对检测到的模型生效。
+
+    /** 当前需要二值化钳制的参数 ID 列表（其他模型为空数组，零开销跳过） */
+    let steppedParamIds: string[] = [];
+
+    /**
+     * 模型加载后调用：
+     * 1. 检测 idle motion 中的 stepped 参数
+     * 2. 禁用已加载 motion 实例的 fadeIn/fadeOut
+     * 3. 记录需要二值化的参数 ID
+     */
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    async function setupFrameSwitchProtection(model: any, modelPath: string) {
+        steppedParamIds = [];
+
+        // ── Step 1: 解析 motion 文件，检测 stepped 参数 ─────────
+        let detected: string[] = [];
+        try {
+            const modelRes = await fetch("/" + modelPath);
+            if (!modelRes.ok) return;
+            const modelData = await modelRes.json();
+            const idleList = modelData?.FileReferences?.Motions?.Idle;
+            if (!Array.isArray(idleList) || idleList.length === 0) return;
+
+            const motionRel = idleList[0].File;
+            if (!motionRel) return;
+            const modelDir = modelPath.substring(0, modelPath.lastIndexOf("/"));
+            const motionRes = await fetch("/" + modelDir + "/" + motionRel);
+            if (!motionRes.ok) return;
+            const motionData = await motionRes.json();
+
+            const curves = motionData?.Curves;
+            if (!Array.isArray(curves)) return;
+
+            for (const curve of curves) {
+                if (curve.Target !== "Parameter") continue;
+                const segs: number[] = curve.Segments;
+                if (!Array.isArray(segs)) continue;
+
+                let hasStepped = false;
+                let i = 2; // 跳过首个控制点 [time, value]
+                while (i < segs.length) {
+                    const t = segs[i];
+                    if (t === 0) i += 3;       // linear
+                    else if (t === 1) i += 7;  // bezier
+                    else if (t === 2 || t === 3) { hasStepped = true; i += 3; } // stepped
+                    else break;
+                }
+                if (hasStepped) detected.push(curve.Id);
+            }
+        } catch (e) {
+            console.warn("[Live2D] stepped 参数检测失败:", e);
+            return;
+        }
+
+        if (detected.length === 0) return;
+
+        // ── Step 2: 禁用已加载 motion 实例的 fade 权重 ──────────
+        // pixi-live2d-display 在 motionManager 内部缓存了已加载的 Motion 实例。
+        // 即使 definitions 上 FadeInTime=0，已创建的实例可能带有默认 fade。
+        // 遍历 motionManager 内部缓存，将 Idle 组的 fade 全部归零。
+        try {
+            const mm = model.internalModel.motionManager;
+            if (mm) {
+                // motionManager.motionGroups: Map<string, CubismMotion[]>
+                // 或 motionManager._motionGroups（不同版本命名不同）
+                const groups = mm.motionGroups ?? mm._motionGroups;
+                if (groups) {
+                    const idleMotions = groups.Idle ?? groups.idle;
+                    if (Array.isArray(idleMotions)) {
+                        for (const motion of idleMotions) {
+                            if (motion) {
+                                // CubismMotion 实例的 fade 属性
+                                if (typeof motion.setFadeInTime === "function") motion.setFadeInTime(0);
+                                if (typeof motion.setFadeOutTime === "function") motion.setFadeOutTime(0);
+                                // 有些版本用属性而非方法
+                                if ("_fadeInSeconds" in motion) motion._fadeInSeconds = 0;
+                                if ("_fadeOutSeconds" in motion) motion._fadeOutSeconds = 0;
+                            }
+                        }
+                        console.info(`[Live2D] 已禁用 ${idleMotions.length} 个 idle motion 的 crossfade`);
+                    }
+                }
+                // 同时修改 definitions（影响后续新创建的 motion 实例）
+                const defs = mm.definitions?.Idle ?? mm.definitions?.idle;
+                if (Array.isArray(defs)) {
+                    for (const def of defs) {
+                        def.FadeInTime = 0;
+                        def.FadeOutTime = 0;
+                    }
+                }
+                // motionManager 自身的默认 fade
+                if ("_fadeInTime" in mm) mm._fadeInTime = 0;
+                if ("_fadeOutTime" in mm) mm._fadeOutTime = 0;
+            }
+        } catch (e) {
+            console.warn("[Live2D] fade 禁用失败（将依赖二值化钳制）:", e);
+        }
+
+        // ── Step 3: hook 模型 update，在 motion+physics 之后强制二值化 ──
+        // pixi-live2d-display 的渲染流程：
+        //   motionManager.update() → physics.update() → coreModel.update()
+        // 我们需要在 coreModel.update() 之前插入二值化。
+        // 方法：包装 internalModel 的 update 方法，在原始 update 执行后、
+        // coreModel.update 被调用前修正参数值。
+        // 但实际上 coreModel.update 是在 internalModel.update 内部调用的，
+        // 所以更可靠的方式是直接 hook coreModel.update。
+        steppedParamIds = detected;
+        try {
+            const core = model.internalModel.coreModel;
+            const originalUpdate = core.update.bind(core);
+            const paramIds = core._model.parameters.ids;
+            const paramVals = core._model.parameters.values;
+            // 预计算参数索引，避免每帧查找
+            const idxMap: number[] = [];
+            for (const id of detected) {
+                const idx = paramIds.indexOf(id);
+                if (idx >= 0) idxMap.push(idx);
+            }
+            core.update = function () {
+                // 在 coreModel.update() 执行前（此时 motion+physics 已写入参数值），
+                // 将 stepped 参数强制二值化
+                for (const idx of idxMap) {
+                    paramVals[idx] = paramVals[idx] >= 0.5 ? 1 : 0;
+                }
+                return originalUpdate();
+            };
+            console.info(
+                `[Live2D] 帧切换保护已启用：${detected.length} 个参数 ` +
+                `(${detected.join(", ")})，已 hook coreModel.update 进行二值化`
+            );
+        } catch (e) {
+            console.warn("[Live2D] coreModel hook 失败，回退到 ticker 二值化:", e);
+            // 回退：steppedParamIds 不清空，ticker 中的二值化作为后备
+        }
+    }
+
     // ── 模型个性化配置读写 ──────────────────────────────────────
     // 以模型路径为 key，存储每个模型的 zoom/y 偏移
     // 格式：{ "live2d/hiyori_vts/hiyori.model3.json": { zoom: 1.7, y: -80 }, ... }
@@ -159,6 +308,9 @@
                 core.setPartOpacityById("PartArmB", 0);
             } catch { /* 该模型无此 Part，忽略 */ }
 
+            // 帧切换保护：检测 stepped 参数 + 禁用 crossfade + 启用二值化
+            setupFrameSwitchProtection(live2dModel, modelPath);
+
         } catch (e) {
             console.error("[Live2D] 模型加载失败:", e);
             live2dError.value = true;
@@ -171,8 +323,23 @@
         // clear canvas + draw Sprite → 后缓冲，rAF 结束原子交换到前缓冲
         // DWM 永远只看前缓冲 → 永远是完整帧
         pixiApp.ticker.add(() => {
+            // ── 帧切换参数二值化钳制 ──────────────────────────────
+            // 在物理/motion 更新之后、渲染之前的最后一刻强制修正。
+            // steppedParamIds 为空时（大多数模型）直接跳过，零开销。
+            if (steppedParamIds.length > 0 && live2dModel && live2dReady.value) {
+                try {
+                    const core = live2dModel.internalModel.coreModel;
+                    const ids = core._model.parameters.ids;
+                    const vals = core._model.parameters.values;
+                    for (const id of steppedParamIds) {
+                        const idx = ids.indexOf(id);
+                        if (idx >= 0) {
+                            vals[idx] = vals[idx] >= 0.5 ? 1 : 0;
+                        }
+                    }
+                } catch { /* ignore */ }
+            }
             renderer.render(live2dContainer, { renderTexture, clear: true });
-            // PIXI 随后自动把 stage（含 displaySprite）渲染到 canvas
         });
 
         live2dReady.value = true;
@@ -471,6 +638,9 @@
                 core.setPartOpacityById("PartArmA", 1);
                 core.setPartOpacityById("PartArmB", 0);
             } catch { /* 该模型无此 Part，忽略 */ }
+
+            // 帧切换保护
+            setupFrameSwitchProtection(live2dModel, newPath);
 
             live2dReady.value = true;
             console.info(`[Live2D] 模型切换成功 ✓  (${newPath})`);
