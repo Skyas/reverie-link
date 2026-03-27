@@ -5,91 +5,137 @@ FastAPI + WebSocket 主入口
 
 import json
 import os
+import re
+import time
 from collections import deque
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import asyncio
 import tempfile
 import uuid
+from typing import Optional
 
 import httpx
 import pyttsx3
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.websockets import WebSocket, WebSocketDisconnect
 from openai import AsyncOpenAI
 
-from prompt_builder import DEFAULT_CHARACTER, build_messages, build_system_prompt
+from prompt_builder import (
+    DEFAULT_CHARACTER,
+    DEFAULT_WINDOW_INDEX,
+    WINDOW_PRESETS,
+    build_messages,
+    build_system_prompt,
+    build_vision_speech_messages,
+    build_screenshot_messages,
+)
+
+from memory import (
+    init_memory_system,
+    shutdown_memory_system,
+    MessageType,
+    TimelineMessage,
+    NotebookSource,
+    NotebookEntry,
+    generate_session_id,
+    save_message,
+    get_messages_page,
+    get_sessions,
+    search_messages,
+    delete_messages_by_character,
+    export_messages_by_character,
+    get_entries_page,
+    get_all_entries,
+    add_entry as nb_add_entry,
+    update_entry as nb_update_entry,
+    delete_entry as nb_delete_entry,
+    count_entries as nb_count_entries,
+    delete_entries_by_character,
+    export_entries_by_character,
+    SessionExtractor,
+    SummaryQueue,
+    retrieve_relevant_summaries,
+    delete_summaries_by_character,
+    export_summaries_by_character,
+)
+
+# ── 视觉感知模块 ──────────────────────────────────────────────
+import sys as _sys
+import os as _os
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from vision.vision_system import VisionSystem
 
 # ── 环境变量加载 ───────────────────────────────────────────────
 load_dotenv()
 
-LLM_BASE_URL    = os.getenv("LLM_BASE_URL", "https://api.deepseek.com")
-LLM_API_KEY     = os.getenv("LLM_API_KEY", "")
-LLM_MODEL       = os.getenv("LLM_MODEL", "deepseek-chat")
-HISTORY_ROUNDS  = int(os.getenv("HISTORY_ROUNDS", "10"))
-HISTORY_MAX_LEN = HISTORY_ROUNDS * 2
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com")
+LLM_API_KEY  = os.getenv("LLM_API_KEY", "")
+LLM_MODEL    = os.getenv("LLM_MODEL", "deepseek-chat")
 
-# ── Live2D 模型目录 ────────────────────────────────────────────
+# Phase 3: 滑动窗口上限保护（deque maxlen）
+_MAX_HISTORY_ITEMS = WINDOW_PRESETS[-1][2] * 2 # 极限档 35 轮 × 2 = 70 条
+
+# ── 路径常量 ───────────────────────────────────────────────────
 LIVE2D_DIR = Path(__file__).parent.parent / "public" / "live2d"
-
-# ── RVC 音色目录 ────────────────────────────────────────────────
-# 用户将 .pth 和 .index 文件放入 public/rvc/ 即可自动识别
-RVC_DIR = Path(__file__).parent.parent / "public" / "rvc"
-
-# ── 临时音频目录（Edge-TTS 原声 + RVC 输出）──────────────────────
-TMP_DIR = Path(__file__).parent / "tmp_audio"
+RVC_DIR    = Path(__file__).parent.parent / "public" / "rvc"
+TMP_DIR    = Path(__file__).parent / "tmp_audio"
 TMP_DIR.mkdir(exist_ok=True)
 
-# ── FastAPI 实例 ───────────────────────────────────────────────
-app = FastAPI(title="Reverie Link Backend", version="0.2.0")
 
-# 允许前端（Vite devserver）跨域请求 HTTP 接口
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+# ── 视觉感知全局状态 ──────────────────────────────────────────
+vision_speech_queue: asyncio.Queue = asyncio.Queue()
+vision_system: Optional[VisionSystem] = None
+
+
+# ── FastAPI 生命周期 ───────────────────────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global vision_system
+    init_memory_system()
+    vision_system = VisionSystem(speech_queue=vision_speech_queue)
+    vision_system.start()
+    yield
+    if vision_system:
+        vision_system.stop()
+    shutdown_memory_system()
+
+
+app = FastAPI(title="Reverie Link Backend", version="0.3.2", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+# ── 全局状态 ───────────────────────────────────────────────────
+llm_client           = AsyncOpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+current_character    = DEFAULT_CHARACTER
+system_prompt        = build_system_prompt(current_character)
+current_window_index: int = DEFAULT_WINDOW_INDEX
+current_character_id: str = ""   # 当前激活角色卡的 preset.id，角色隔离键
+
+# 关键词快筛：匹配用户请求观察屏幕的意图
+_SCREENSHOT_KEYWORDS = re.compile(
+    r"(看看屏幕|屏幕上|画面|你看到了什么|帮我看看|看一眼|看一下|"
+    r"屏幕怎么了|你看到什么|现在在干什么|帮我看|屏幕里)",
+    re.IGNORECASE,
 )
-
-# ── LLM 客户端（全局复用）──────────────────────────────────────
-llm_client = AsyncOpenAI(
-    api_key=LLM_API_KEY,
-    base_url=LLM_BASE_URL,
-)
-
-# ── 当前使用的角色配置 ─────────────────────────────────────────
-current_character = DEFAULT_CHARACTER
-system_prompt     = build_system_prompt(current_character)
 
 
 # ── Live2D 模型扫描接口 ────────────────────────────────────────
 @app.get("/api/live2d/models")
 async def list_live2d_models():
-    """
-    扫描 public/live2d/ 目录，返回所有可用模型列表。
-    每个子文件夹只要包含 *.model3.json 就被识别为一个模型。
-
-    自动修复：若 model3.json 缺少 Motions 字段但存在 animations/ 或 motion/ 文件夹，
-    自动将 idle 动画注入 model3.json（原地写入，用户无感）。
-    """
     if not LIVE2D_DIR.exists():
         return {"models": [], "error": f"目录不存在：{LIVE2D_DIR}"}
-
     models = []
     for folder in sorted(LIVE2D_DIR.iterdir()):
         if not folder.is_dir():
             continue
-
         model_files = sorted(folder.glob("*.model3.json"))
         if not model_files:
             continue
-
         model_file = model_files[0]
-
-        # ── 自动修复：补全缺失的 Motions 字段 ────────────────────
         try:
             _auto_fix_motions(folder, model_file)
         except Exception as e:
@@ -101,80 +147,36 @@ async def list_live2d_models():
             print(f"[AutoFix] {folder.name} idle 优化失败（跳过）: {e}")
 
         display_name = folder.name.replace("_", " ").replace("-", " ")
-        models.append({
-            "folder":       folder.name,
-            "display_name": display_name,
-            "path":         f"live2d/{folder.name}/{model_file.name}",
-        })
-
+        models.append({"folder": folder.name, "display_name": display_name, "path": f"live2d/{folder.name}/{model_file.name}"})
     return {"models": models}
 
 
 def _auto_fix_motions(folder: Path, model_file: Path) -> None:
-    """
-    检查 model3.json 是否缺少 Motions 字段。
-    若缺少，且存在 animations/ 或 motion/ 子目录，则自动将其中的
-    motion3.json 文件注册进去，idle 动画优先（文件名含 idle 或排序第一个）。
-    已有 Motions 字段的模型跳过，不做修改。
-    """
     import json as _json
-
     with open(model_file, "r", encoding="utf-8") as f:
         data = _json.load(f)
-
     file_refs = data.get("FileReferences", {})
-
-    # 已有 Motions 且不为空 → 不处理
     if file_refs.get("Motions"):
         return
-
-    # 查找动作文件夹：优先 animations/，其次 motion/
     motion_dir = None
     for candidate in ["animations", "motion"]:
         p = folder / candidate
         if p.is_dir():
             motion_dir = p
             break
-
     if motion_dir is None:
-        return  # 没有动作文件夹，无需处理
-
+        return
     motion_files = sorted(motion_dir.glob("*.motion3.json"))
     if not motion_files:
         return
-
-    # 找 idle 动画：文件名含 idle（不区分大小写），否则取排序第一个
     idle_candidates = [f for f in motion_files if "idle" in f.name.lower()]
     idle_file = idle_candidates[0] if idle_candidates else motion_files[0]
-
-    # 构造相对于模型文件夹的路径（用正斜杠）
-    rel_dir = motion_dir.name  # "animations" 或 "motion"
-
-    idle_entry = {
-        "File": f"{rel_dir}/{idle_file.name}",
-        "FadeInTime": 0.5,
-        "FadeOutTime": 0.5,
-    }
-
-    other_entries = [
-        {
-            "File": f"{rel_dir}/{f.name}",
-            "FadeInTime": 0.3,
-            "FadeOutTime": 0.3,
-        }
-        for f in motion_files if f != idle_file
-    ]
-
-    file_refs["Motions"] = {"Idle": [idle_entry]}
-    if other_entries:
-        file_refs["Motions"][""] = other_entries
-
+    rel_dir = motion_dir.name
+    file_refs["Motions"] = {"Idle": [{"File": f"{rel_dir}/{idle_file.name}", "FadeInTime": 0.5, "FadeOutTime": 0.5}]}
+    file_refs["Motions"][""] = [{"File": f"{rel_dir}/{f.name}", "FadeInTime": 0.3, "FadeOutTime": 0.3} for f in motion_files if f != idle_file]
     data["FileReferences"] = file_refs
-
-    # 写回文件，保留原有缩进风格
     with open(model_file, "w", encoding="utf-8") as f:
-        _json.dump(data, f, ensure_ascii=False, indent="	")
-
+        _json.dump(data, f, ensure_ascii=False, indent="\t")
     print(f"[AutoFix] {folder.name}: 自动注入 Motions（idle={idle_file.name}，共 {len(motion_files)} 个动作）")
 
 
@@ -245,248 +247,259 @@ def _optimize_idle_fade(folder: Path, model_file: Path) -> None:
 # ── ElevenLabs TTS 接口 ───────────────────────────────────────
 @app.post("/api/tts")
 async def tts(body: dict):
-    """
-    调用 ElevenLabs TTS API，返回 MP3 音频流。
-    请求体：{ text, api_key, voice_id }
-    API Key 和 Voice ID 由前端从用户配置中读取并传入，后端不存储。
-    """
     text     = body.get("text", "").strip()
     api_key  = body.get("api_key", "").strip()
     voice_id = body.get("voice_id", "").strip()
-
     if not text or not api_key or not voice_id:
-        return Response(
-            content=json.dumps({"error": "缺少 text / api_key / voice_id"}, ensure_ascii=False),
-            status_code=400,
-            media_type="application/json",
-        )
-
+        return Response(content=json.dumps({"error": "缺少 text / api_key / voice_id"}, ensure_ascii=False), status_code=400, media_type="application/json")
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-    headers = {
-        "xi-api-key":   api_key,
-        "Content-Type": "application/json",
-        "Accept":       "audio/mpeg",
-    }
-    payload = {
-        "text": text,
-        "model_id": "eleven_flash_v2_5",   # 最低延迟模型，适合对话场景
-        "voice_settings": {
-            "stability":        0.45,   # 适度稳定，保留情感起伏
-            "similarity_boost": 0.80,   # 高相似度，贴近原始音色
-            "style":            0.35,   # 适度风格，避免过于夸张
-            "use_speaker_boost": True,
-        },
-    }
-
+    headers = {"xi-api-key": api_key, "Content-Type": "application/json", "Accept": "audio/mpeg"}
+    payload = {"text": text, "model_id": "eleven_flash_v2_5", "voice_settings": {"stability": 0.45, "similarity_boost": 0.80, "style": 0.35, "use_speaker_boost": True}}
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(url, headers=headers, json=payload)
-
         if resp.status_code != 200:
-            err = resp.text[:200]
-            print(f"[TTS] ElevenLabs 返回错误 {resp.status_code}: {err}")
-            return Response(
-                content=json.dumps({"error": f"ElevenLabs 错误: {resp.status_code}"}, ensure_ascii=False),
-                status_code=resp.status_code,
-                media_type="application/json",
-            )
-
+            return Response(content=json.dumps({"error": f"ElevenLabs 错误: {resp.status_code}"}, ensure_ascii=False), status_code=502, media_type="application/json")
         return Response(content=resp.content, media_type="audio/mpeg")
-
     except httpx.TimeoutException:
-        return Response(
-            content=json.dumps({"error": "TTS 请求超时，请检查网络"}, ensure_ascii=False),
-            status_code=504,
-            media_type="application/json",
-        )
+        return Response(content=json.dumps({"error": "ElevenLabs 请求超时"}, ensure_ascii=False), status_code=504, media_type="application/json")
     except Exception as e:
-        print(f"[TTS] 异常: {e}")
-        return Response(
-            content=json.dumps({"error": str(e)[:100]}, ensure_ascii=False),
-            status_code=500,
-            media_type="application/json",
-        )
+        return Response(content=json.dumps({"error": str(e)}, ensure_ascii=False), status_code=500, media_type="application/json")
 
 
 # ── RVC 音色扫描接口 ───────────────────────────────────────────
 @app.get("/api/rvc/voices")
 async def list_rvc_voices():
-    """
-    扫描 public/rvc/ 目录，返回所有可用音色。
-
-    命名规则（强制）：.pth 和 .index 文件必须同名（扩展名不同），例如：
-        Hibiki.pth  +  Hibiki.index  → 正常匹配
-        Amy.pth     +  Amy.index     → 正常匹配
-        Mike.pth    （无同名 .index） → index_missing = True，界面提示用户
-
-    返回格式：
-    [{ "name": "Hibiki", "pth": "rvc/Hibiki.pth", "index": "rvc/Hibiki.index",
-       "index_missing": false }]
-    """
     if not RVC_DIR.exists():
         return {"voices": []}
-
-    # 收集所有 .index 文件的 stem 集合（用于快速查找）
-    index_stems = {f.stem: f for f in RVC_DIR.glob("*.index")}
-
     voices = []
     for pth_file in sorted(RVC_DIR.glob("*.pth")):
         name = pth_file.stem
-
-        # 精确同名匹配（大小写敏感，要求用户按规范命名）
-        matched_index_file = index_stems.get(name)
-        index_path  = f"rvc/{matched_index_file.name}" if matched_index_file else ""
-        index_missing = matched_index_file is None
-
-        voices.append({
-            "name":          name,
-            "pth":           f"rvc/{pth_file.name}",
-            "index":         index_path,
-            "index_missing": index_missing,
-        })
-
+        index_file = RVC_DIR / f"{name}.index"
+        voices.append({"name": name, "pth": f"rvc/{pth_file.name}", "index": f"rvc/{index_file.name}" if index_file.exists() else "", "index_missing": not index_file.exists()})
     return {"voices": voices}
 
 
 # ── 本地 RVC TTS 接口 ──────────────────────────────────────────
 @app.post("/api/tts/local")
 async def tts_local(body: dict):
-    """
-    本地语音合成：Edge-TTS 生成原声 → RVC v2 变声 → 返回 WAV。
-    请求体：{ text, pth, index, edge_voice }
-    - pth：相对于项目根的路径，如 "rvc/Hibiki.pth"
-    - index：同上，可为空字符串
-    - edge_voice：Edge-TTS 语音名，默认 zh-CN-XiaoxiaoNeural
-    """
     text       = body.get("text", "").strip()
     pth        = body.get("pth", "").strip()
     index      = body.get("index", "").strip()
     edge_voice = body.get("edge_voice", "zh-CN-XiaoxiaoNeural").strip()
-
     if not text or not pth:
-        return Response(
-            content=json.dumps({"error": "缺少 text 或 pth"}, ensure_ascii=False),
-            status_code=400, media_type="application/json",
-        )
-
-    project_root = Path(__file__).parent.parent
-    # 前端传入路径如 "rvc/Hibiki.pth"，实际文件在 public/rvc/ 下
-    pth_path   = project_root / "public" / pth
-    index_path = (project_root / "public" / index) if index else None
-
+        return Response(content=json.dumps({"error": "缺少 text 或 pth"}, ensure_ascii=False), status_code=400, media_type="application/json")
+    pth_path   = Path(__file__).parent.parent / "public" / pth
+    index_path = Path(__file__).parent.parent / "public" / index if index else None
     if not pth_path.exists():
-        return Response(
-            content=json.dumps({"error": f"模型文件不存在: {pth}"}, ensure_ascii=False),
-            status_code=404, media_type="application/json",
-        )
-
-    uid          = uuid.uuid4().hex[:8]
-    raw_path     = TMP_DIR / f"raw_{uid}.wav"   # pyttsx3 输出 WAV
-    output_path  = TMP_DIR / f"out_{uid}.wav"
-
+        return Response(content=json.dumps({"error": f"模型文件不存在: {pth}"}, ensure_ascii=False), status_code=404, media_type="application/json")
+    tmp_mp3 = TMP_DIR / f"edge_{uuid.uuid4().hex}.mp3"
+    tmp_wav = TMP_DIR / f"rvc_{uuid.uuid4().hex}.wav"
     try:
-        # ── Step 1: pyttsx3 离线生成原声（Windows SAPI，无需网络）──
-        def generate_base_tts():
-            engine = pyttsx3.init()
-            # 尝试根据 edge_voice 选择中文语音
-            voices = engine.getProperty("voices")
-            zh_voices = [v for v in voices if "zh" in v.id.lower()
-                        or "chinese" in v.name.lower()
-                        or "huihui" in v.name.lower()
-                        or "yaoyao" in v.name.lower()]
-            if zh_voices:
-                engine.setProperty("voice", zh_voices[0].id)
-            engine.setProperty("rate", 200)   # 语速，稍快适合对话
-            engine.setProperty("volume", 1.0)
-            # pyttsx3 在 Windows 上直接保存为 wav
-            raw_wav = str(raw_path).replace(".mp3", ".wav")
-            engine.save_to_file(text, raw_wav)
-            engine.runAndWait()
-            return raw_wav
-
-        raw_wav_path = await asyncio.to_thread(generate_base_tts)
-        raw_path = Path(raw_wav_path)  # 更新 raw_path 为实际生成的 wav 文件
-
-        # ── Step 2: RVC 变声 ─────────────────────────────────────
-        # rvc-python 的推理在同步代码里执行，用 asyncio.to_thread 避免阻塞事件循环
-        def run_rvc():
-            import torch
-            
-            # --- 核心修复补丁：兼容 PyTorch 2.6+ ---
-            original_load = torch.load
-            def patched_load(*args, **kwargs):
-                kwargs.setdefault('weights_only', False)
-                return original_load(*args, **kwargs)
-            torch.load = patched_load
-            # --------------------------------------
-
-            from rvc_python.infer import RVCInference
-            device = "cuda:0" if _has_cuda() else "cpu"
-            rvc = RVCInference(device=device)
-            rvc.load_model(
-                str(pth_path),
-                version="v2",
-                index_path=str(index_path) if index_path and index_path.exists() else "",
-            )
-            # 推理参数通过属性赋值（rvc-python 的接口方式）
-            rvc.f0method      = "rmvpe"  # pitch 提取算法，rmvpe 效果最佳
-            rvc.index_rate    = 0.75     # index 文件影响度（0~1）
-            rvc.protect       = 0.33     # 清辅音保护（0~0.5）
-            rvc.f0up_key      = 0        # 音调偏移，0 = 不偏移
-            rvc.filter_radius = 3        # 中值滤波半径
-            rvc.rms_mix_rate  = 0.25     # 音量包络混合比
-            rvc.infer_file(str(raw_path), str(output_path))
-
-        await asyncio.to_thread(run_rvc)
-
-        if not output_path.exists():
-            raise RuntimeError("RVC 输出文件未生成")
-
-        audio_bytes = output_path.read_bytes()
-        return Response(content=audio_bytes, media_type="audio/wav")
-
+        import edge_tts
+        communicate = edge_tts.Communicate(text, edge_voice)
+        await communicate.save(str(tmp_mp3))
+        rvc_script = Path(__file__).parent / "rvc_infer.py"
+        cmd = ["python", str(rvc_script), "--pth", str(pth_path), "--input", str(tmp_mp3), "--output", str(tmp_wav)]
+        if index_path and index_path.exists():
+            cmd += ["--index", str(index_path)]
+        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+        if proc.returncode != 0:
+            print(f"[RVC] 推理失败: {stderr.decode(errors='replace')[:300]}")
+            return Response(content=json.dumps({"error": "RVC 推理失败"}, ensure_ascii=False), status_code=500, media_type="application/json")
+        return Response(content=tmp_wav.read_bytes(), media_type="audio/wav")
+    except asyncio.TimeoutError:
+        return Response(content=json.dumps({"error": "RVC 推理超时（超过60秒）"}, ensure_ascii=False), status_code=504, media_type="application/json")
+    except ImportError:
+        return Response(content=json.dumps({"error": "edge-tts 未安装，请执行 pip install edge-tts"}, ensure_ascii=False), status_code=501, media_type="application/json")
     except Exception as e:
-        print(f"[TTS Local] 错误: {e}")
-        return Response(
-            content=json.dumps({"error": str(e)[:150]}, ensure_ascii=False),
-            status_code=500, media_type="application/json",
-        )
+        return Response(content=json.dumps({"error": str(e)}, ensure_ascii=False), status_code=500, media_type="application/json")
     finally:
-        # 清理临时文件
-        for f in [raw_path, output_path]:
+        for f in [tmp_mp3, tmp_wav]:
             try:
-                if f.exists(): f.unlink()
+                if f.exists():
+                    f.unlink()
             except Exception:
                 pass
 
 
-def _has_cuda() -> bool:
-    """检测是否有可用的 CUDA GPU"""
+# ── 工具函数 ──────────────────────────────────────────────────
+# 已知情绪标签集合（与前端 EMOTION_TAGS 保持同步）
+_KNOWN_EMOTIONS = {"happy", "sad", "angry", "shy", "surprised", "neutral", "sigh"}
+ 
+def _extract_emotion(text: str) -> str:
+    """
+    提取 AI 回复中的情绪标签。
+    优先匹配已知标签；若 LLM 造了未知标签，兜底正则也能识别
+    但不存入已知情绪，记为空字符串（前端统一剥离即可）。
+    """
+    # 精确匹配已知标签
+    match = re.search(r'\[(happy|sad|angry|shy|surprised|neutral|sigh)\]', text, re.IGNORECASE)
+    if match:
+        return match.group(1).lower()
+    return ""
+
+
+# ── 视觉主动发言辅助函数 ──────────────────────────────
+ 
+# 全局的最近发言记录（防重复用）
+_recent_vision_speeches: list = []
+ 
+ 
+async def _drain_vision_speech(
+    websocket: WebSocket,
+    llm_client,
+    llm_model: str,
+    system_prompt: str,
+    session_id: str,
+    session_character_id: str,
+    history,
+    session_messages: list,
+    # ── 以下是新增参数 ──
+    window_index: int = 1,
+    character_name: str = "",
+):
+    """
+    检查并处理视觉感知主动发言队列中的待发事件。
+    每次最多处理 1 条，避免连续刷屏。
+    """
+    global _recent_vision_speeches
+ 
     try:
-        import torch
-        return torch.cuda.is_available()
-    except ImportError:
-        return False
+        trigger = vision_speech_queue.get_nowait()
+    except asyncio.QueueEmpty:
+        return
+ 
+    if trigger.get("session_id") and trigger["session_id"] != session_id:
+        return
+ 
+    try:
+        # 改进：传入 recent_speeches 和 history
+        messages = build_vision_speech_messages(
+            system_prompt,
+            trigger,
+            recent_speeches=_recent_vision_speeches,
+            history=list(history),
+            window_index=window_index,
+            character_id=session_character_id,
+            character_name=character_name,
+        )
+        try:
+            response = await llm_client.chat.completions.create(
+                model=llm_model, messages=messages,
+                max_completion_tokens=200, temperature=0.9,
+            )
+        except Exception:
+            response = await llm_client.chat.completions.create(
+                model=llm_model, messages=messages,
+                max_tokens=200, temperature=0.9,
+            )
+        reply = response.choices[0].message.content.strip()
+        print(f"[Vision] LLM回复（finish_reason={response.choices[0].finish_reason}）: {reply[:50]}")
+    except Exception as e:
+        print(f"[Vision] 主动发言 LLM 调用失败: {e}")
+        return
+ 
+    emotion     = _extract_emotion(reply)
+    clean_reply = re.sub(r'\[(happy|sad|angry|shy|surprised|neutral|sigh)\]', '', reply, flags=re.IGNORECASE)
+    clean_reply = re.sub(r'\[[a-zA-Z_]+\]', '', clean_reply)
+    clean_reply = clean_reply.strip()
+ 
+    # 改进：允许"不说话"（回复 …… 或空）
+    if not clean_reply or clean_reply in ("……", "...", "。"):
+        return
+ 
+    # 改进：记录最近发言，防重复
+    _recent_vision_speeches.append(clean_reply)
+    if len(_recent_vision_speeches) > 5:
+        _recent_vision_speeches.pop(0)
+ 
+    # 写入时间线
+    scene_info = trigger.get("scene_info", {})
+    game_event_msg = TimelineMessage.create(
+        msg_type=MessageType.GAME_EVENT,
+        content=clean_reply,
+        session_id=session_id,
+        character_id=session_character_id,
+        metadata={
+            "emotion":     emotion,
+            "scene_type":  scene_info.get("scene_type", "unknown"),
+            "game_name":   scene_info.get("game_name"),
+            "confidence":  scene_info.get("confidence", "low"),
+            "source":      "vision_proactive",
+            "reason":      trigger.get("reason", ""),
+        },
+    )
+    save_message(game_event_msg)
+    session_messages.append(game_event_msg)
+ 
+    await websocket.send_text(json.dumps({
+        "type":    "vision_proactive_speech",
+        "message": reply,
+    }, ensure_ascii=False))
 
 
 # ── WebSocket 端点 ─────────────────────────────────────────────
 @app.websocket("/ws/chat")
 async def websocket_chat(websocket: WebSocket):
     await websocket.accept()
-
-    history: deque[dict] = deque(maxlen=HISTORY_MAX_LEN)
+    
+    global llm_client, LLM_MODEL, current_character, system_prompt
+    global current_window_index, current_character_id
+ 
+    session_id           = generate_session_id()
+    history: deque[dict] = deque(maxlen=_MAX_HISTORY_ITEMS)
+    session_window_index: int = current_window_index
+    session_character_id: str = current_character_id
+    
+    # 步骤⑤：每个会话持有一个提取管理器
+    extractor = SessionExtractor(
+        session_id=session_id,
+        character_id=session_character_id,
+        llm_client=llm_client,
+        model=LLM_MODEL,
+        character=current_character,
+    )
+ 
+    # 本会话的完整消息列表（供提取器使用，独立于滑动窗口 history）
+    session_messages: list = []
+    
+    # 步骤⑥：每个会话持有一个摘要队列
+    summary_queue = SummaryQueue(
+        character_id=session_character_id,
+        session_id=session_id,
+        llm_client=llm_client,
+        model=LLM_MODEL,
+        character=current_character,
+    )
 
     try:
         while True:
-            raw = await websocket.receive_text()
+            # 同时监听用户消息和视觉主动发言队列（1 秒轮询间隔）
+            raw = None
+            try:
+                raw = await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
+            except asyncio.TimeoutError:
+                # 无用户消息 → 检查视觉主动发言队列
+                await _drain_vision_speech(
+                    websocket=websocket,
+                    llm_client=llm_client,
+                    llm_model=LLM_MODEL,
+                    system_prompt=system_prompt,
+                    session_id=session_id,
+                    session_character_id=session_character_id,
+                    history=history,
+                    session_messages=session_messages,
+                    window_index=session_window_index,
+                    character_name=current_character.get("name", ""),
+                )
+                continue
 
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError:
-                await websocket.send_text(json.dumps({
-                    "type": "error",
-                    "message": "消息格式错误，请发送 JSON。"
-                }, ensure_ascii=False))
+                await websocket.send_text(json.dumps({"type": "error", "message": "消息格式错误，请发送 JSON。"}, ensure_ascii=False))
                 continue
 
             msg_type = data.get("type")
@@ -496,39 +509,122 @@ async def websocket_chat(websocket: WebSocket):
                 llm_cfg  = data.get("llm", {})
                 char_cfg = data.get("character", {})
 
-                global llm_client, LLM_MODEL, current_character, system_prompt
-
                 if llm_cfg.get("api_key") and llm_cfg.get("base_url"):
-                    llm_client = AsyncOpenAI(
-                        api_key=llm_cfg["api_key"],
-                        base_url=llm_cfg["base_url"],
-                    )
-                    LLM_MODEL = llm_cfg.get("model", LLM_MODEL)
+                    llm_client = AsyncOpenAI(api_key=llm_cfg["api_key"], base_url=llm_cfg["base_url"])
+                    LLM_MODEL  = llm_cfg.get("model", LLM_MODEL)
 
                 if char_cfg:
                     current_character = {**DEFAULT_CHARACTER, **char_cfg}
-                    system_prompt = build_system_prompt(current_character)
+                    system_prompt     = build_system_prompt(current_character)
 
-                await websocket.send_text(json.dumps(
-                    {"type": "configure_ack", "message": "配置已更新"},
-                    ensure_ascii=False
-                ))
+                if "memory_window" in data:
+                    raw_idx = data["memory_window"]
+                    if isinstance(raw_idx, int) and 0 <= raw_idx <= 4:
+                        current_window_index = raw_idx
+                        session_window_index = raw_idx
+
+                if "character_id" in data:
+                    new_cid = str(data["character_id"]).strip()
+                    current_character_id  = new_cid
+                    session_character_id  = new_cid
+
+                # Phase 3: 视觉感知配置
+                if "vision" in data and vision_system:
+                    vision_system.configure(data["vision"])
+                    vision_system.set_main_llm(llm_client, LLM_MODEL)
+                    vision_system.set_session_info(
+                        session_id=session_id,
+                        character_id=session_character_id,
+                        address=current_character.get("address", "你"),
+                    )
+
+                # 步骤⑤：角色/模型切换时同步更新提取器配置
+                extractor.update_config(
+                    llm_client=llm_client,
+                    model=LLM_MODEL,
+                    character=current_character,
+                    character_id=session_character_id,
+                )
+
+                summary_queue.update_config(
+                    llm_client=llm_client,
+                    model=LLM_MODEL,
+                    character=current_character,
+                    character_id=session_character_id,
+                )
+
+                await websocket.send_text(json.dumps({"type": "configure_ack", "message": "配置已更新"}, ensure_ascii=False))
                 continue
 
             if msg_type != "chat" or not user_msg:
                 continue
 
-            messages = build_messages(system_prompt, list(history), user_msg)
+            # Phase 3: 通知视觉系统用户开始交互（打断冷却）
+            if vision_system:
+                vision_system.on_user_message()
+
+            user_timeline_msg = TimelineMessage.create(
+                msg_type=MessageType.USER_TEXT,
+                content=user_msg,
+                session_id=session_id,
+                character_id=session_character_id,
+            )
+            save_message(user_timeline_msg)
+
+            # Phase 3: 关键词快筛 — 用户是否请求观察屏幕
+            user_wants_screenshot = bool(_SCREENSHOT_KEYWORDS.search(user_msg))
+            screenshot_info: Optional[dict] = None
+
+            if user_wants_screenshot and vision_system:
+                screenshot_info = await vision_system.capture_for_user()
+
+            # 步骤⑥：检索相关摘要，注入 Layer 2
+            relevant = retrieve_relevant_summaries(
+                query=user_msg,
+                character_id=session_character_id,
+            )
+
+            if screenshot_info and not screenshot_info.get("error"):
+                # 直接用截图结果组装 messages
+                messages = build_screenshot_messages(
+                    system_prompt,
+                    list(history),
+                    user_msg,
+                    screenshot_info=screenshot_info,
+                    window_index=session_window_index,
+                    character_id=session_character_id,
+                    character_name=current_character.get("name", ""),
+                    relevant_summaries=relevant,
+                )
+            else:
+                messages = build_messages(
+                    system_prompt,
+                    list(history),
+                    user_msg,
+                    window_index=session_window_index,
+                    character_id=session_character_id,
+                    character_name=current_character.get("name", ""),
+                    relevant_summaries=relevant,
+                )
+            
+            # 步骤⑥：计算本轮被滑动窗口移出的消息，推入摘要队列
+            # 原理：trim_history 后的有效条数 < history 总条数，差值即为被移出部分
+            from prompt_builder import trim_history as _trim
+            kept_count   = len(_trim(list(history), session_window_index))
+            total_count  = len(history)
+            evicted_count = total_count - kept_count
+            if evicted_count > 0:
+                # 取 history 最旧的 evicted_count 条（已被移出的部分）
+                # 这些对应 session_messages 中最早的消息
+                evicted_msgs = session_messages[:evicted_count]
+                if evicted_msgs:
+                    summary_queue.push(evicted_msgs)
+                    # 从 session_messages 中移除已入队的消息，避免重复摘要
+                    del session_messages[:evicted_count]
 
             try:
-                response = await llm_client.chat.completions.create(
-                    model=LLM_MODEL,
-                    messages=messages,
-                    max_tokens=150,
-                    temperature=0.85,
-                )
+                response = await llm_client.chat.completions.create(model=LLM_MODEL, messages=messages, max_tokens=300, temperature=0.85)
                 reply = response.choices[0].message.content.strip()
-
             except Exception as e:
                 err_str = str(e)
                 if "api_key" in err_str.lower() or "401" in err_str or "authentication" in err_str.lower():
@@ -543,26 +639,224 @@ async def websocket_chat(websocket: WebSocket):
                     friendly = "还没有配置 API Key，请先打开设置完成配置。"
                 else:
                     friendly = f"出了点问题：{err_str[:80]}"
-
-                await websocket.send_text(json.dumps(
-                    {"type": "error", "message": friendly},
-                    ensure_ascii=False
-                ))
+                await websocket.send_text(json.dumps({"type": "error", "message": friendly}, ensure_ascii=False))
                 continue
 
-            history.append({"role": "user",      "content": user_msg})
-            history.append({"role": "assistant",  "content": reply})
+            # Phase 3: 检测 [NEED_SCREENSHOT] 标签（LLM 意图兜底检测）
+            if reply.startswith("[NEED_SCREENSHOT]") and vision_system and not screenshot_info:
+                screenshot_info = await vision_system.capture_for_user()
+                if screenshot_info and not screenshot_info.get("error"):
+                    # 用截图结果重新生成回复
+                    messages_with_screen = build_screenshot_messages(
+                        system_prompt,
+                        list(history),
+                        user_msg,
+                        screenshot_info=screenshot_info,
+                        window_index=session_window_index,
+                        character_id=session_character_id,
+                        character_name=current_character.get("name", ""),
+                        relevant_summaries=relevant,
+                    )
+                    try:
+                        response2 = await llm_client.chat.completions.create(
+                            model=LLM_MODEL, messages=messages_with_screen,
+                            max_tokens=300, temperature=0.85,
+                        )
+                        reply = response2.choices[0].message.content.strip()
+                    except Exception:
+                        pass  # 保留原 reply
 
-            await websocket.send_text(json.dumps({
-                "type": "chat_response",
-                "message": reply
-            }, ensure_ascii=False))
+            emotion     = _extract_emotion(reply)
+            # 先剥离已知标签，再用兜底正则清除任何残留的 [xxx] 格式未知标签
+            clean_reply = re.sub(r'\[(happy|sad|angry|shy|surprised|neutral|sigh)\]', '', reply, flags=re.IGNORECASE)
+            clean_reply = re.sub(r'\[NEED_SCREENSHOT\]', '', clean_reply, flags=re.IGNORECASE)
+            clean_reply = re.sub(r'\[[a-zA-Z_]+\]', '', clean_reply)  # 兜底：清除未知标签
+            clean_reply = clean_reply.strip()
+
+            ai_timeline_msg = TimelineMessage.create(
+                msg_type=MessageType.AI_REPLY,
+                content=clean_reply,
+                session_id=session_id,
+                character_id=session_character_id,
+                reply_to=user_timeline_msg.id,
+                metadata={"emotion": emotion} if emotion else {},
+            )
+            save_message(ai_timeline_msg)
+
+            now_ts = time.time()
+            history.append({"role": "user",     "content": user_msg, "timestamp": now_ts})
+            history.append({"role": "assistant", "content": reply,    "timestamp": now_ts})
+ 
+            # 步骤⑤：记录完整消息供提取器使用，并判断是否触发提取
+            session_messages.append(user_timeline_msg)
+            session_messages.append(ai_timeline_msg)
+            extractor.on_round_complete(session_messages)
+ 
+            await websocket.send_text(json.dumps({"type": "chat_response", "message": reply}, ensure_ascii=False))
+
+            # Phase 3: 用户消息处理完成，恢复视觉感知的主动发言权
+            if vision_system:
+                vision_system.on_user_message_done()
 
     except WebSocketDisconnect:
-        pass
+        print(f"[WS] 会话 {session_id} 断开（角色：{session_character_id}）")
+        # 步骤⑤：会话结束时对未提取内容做收尾提取
+        extractor.on_session_end(session_messages)
+        # 步骤⑥：会话结束时强制 flush 摘要队列
+        summary_queue.flush_now()
 
 
 # ── 健康检查 ───────────────────────────────────────────────────
 @app.get("/health")
 async def health():
-    return {"status": "ok", "model": LLM_MODEL}
+    name, _, max_rounds = WINDOW_PRESETS[current_window_index]
+    return {"status": "ok", "model": LLM_MODEL, "character_id": current_character_id, "memory_window": current_window_index, "memory_window_name": name, "memory_max_rounds": max_rounds}
+
+@app.get("/api/memory/window")
+async def api_memory_window():
+    return {
+        "current_index": current_window_index,
+        "current_name": WINDOW_PRESETS[current_window_index][0],
+        "presets": [{"index": i, "name": name, "time_minutes": secs // 60, "max_rounds": rounds} for i, (name, secs, rounds) in enumerate(WINDOW_PRESETS)],
+    }
+
+
+# ══════════════════════════════════════════════════════════════════
+# Phase 3: 聊天记录 API
+# ══════════════════════════════════════════════════════════════════
+
+@app.get("/api/chat/sessions")
+async def api_chat_sessions(character_id: str = Query(None)):
+    return {"sessions": get_sessions(character_id=character_id)}
+
+
+@app.get("/api/chat/messages")
+async def api_chat_messages(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(30, ge=1, le=100),
+    session_id: str = Query(None),
+    keyword: str = Query(None),
+    character_id: str = Query(None),
+):
+    result = get_messages_page(page=page, page_size=page_size, session_id=session_id, keyword=keyword, character_id=character_id)
+    result["items"] = [m.to_dict() for m in result["items"]]
+    return result
+
+
+@app.get("/api/chat/search")
+async def api_chat_search(
+    keyword: str = Query(..., min_length=1),
+    limit: int = Query(50, ge=1, le=200),
+    character_id: str = Query(None),
+):
+    results = search_messages(keyword, limit=limit, character_id=character_id)
+    return {"items": [m.to_dict() for m in results]}
+
+
+# ══════════════════════════════════════════════════════════════════
+# Phase 3: 笔记本（世界书）API
+# ══════════════════════════════════════════════════════════════════
+
+@app.get("/api/notebook/entries")
+async def api_notebook_entries(
+    source: str = Query(..., pattern="^(manual|auto)$"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=50),
+    keyword: str = Query(None),
+    search_by: str = Query("content", pattern="^(content|tag)$"),
+    character_id: str = Query(None),
+):
+    nb_source = NotebookSource(source)
+    result = get_entries_page(source=nb_source, page=page, page_size=page_size, keyword=keyword, search_by=search_by, character_id=character_id)
+    result["items"] = [e.to_dict() for e in result["items"]]
+    return result
+
+
+@app.post("/api/notebook/entries")
+async def api_notebook_add(body: dict):
+    content      = body.get("content", "").strip()
+    tags         = body.get("tags", [])
+    character_id = body.get("character_id", "").strip()
+    if not content:
+        return Response(content=json.dumps({"error": "内容不能为空"}, ensure_ascii=False), status_code=400, media_type="application/json")
+    entry = NotebookEntry.create(source=NotebookSource.MANUAL, content=content, tags=tags, character_id=character_id)
+    nb_add_entry(entry)
+    return {"ok": True, "entry": entry.to_dict()}
+
+
+@app.put("/api/notebook/entries/{entry_id}")
+async def api_notebook_update(entry_id: str, body: dict):
+    content = body.get("content", "").strip()
+    tags    = body.get("tags", [])
+    if not content:
+        return Response(content=json.dumps({"error": "内容不能为空"}, ensure_ascii=False), status_code=400, media_type="application/json")
+    ok = nb_update_entry(entry_id, content, tags)
+    if not ok:
+        return Response(content=json.dumps({"error": "条目不存在或非手动区条目"}, ensure_ascii=False), status_code=404, media_type="application/json")
+    return {"ok": True}
+
+
+@app.delete("/api/notebook/entries/{entry_id}")
+async def api_notebook_delete(entry_id: str):
+    ok = nb_delete_entry(entry_id)
+    if not ok:
+        return Response(content=json.dumps({"error": "条目不存在"}, ensure_ascii=False), status_code=404, media_type="application/json")
+    return {"ok": True}
+
+
+@app.get("/api/notebook/stats")
+async def api_notebook_stats(character_id: str = Query(None)):
+    return {
+        "total":  nb_count_entries(character_id=character_id),
+        "manual": nb_count_entries(NotebookSource.MANUAL, character_id=character_id),
+        "auto":   nb_count_entries(NotebookSource.AUTO,   character_id=character_id),
+    }
+
+
+# ══════════════════════════════════════════════════════════════════
+# Phase 3: 角色数据管理 API（删除 / 导出）
+# ══════════════════════════════════════════════════════════════════
+
+@app.get("/api/character/{character_id}/export")
+async def api_character_export(character_id: str):
+    """
+    导出指定角色卡的全部数据（聊天记录 + 笔记本）为 JSON 文件。
+    由前端在删除确认弹框中"导出后删除"按钮触发。
+    """
+    from datetime import datetime
+    chat_data     = export_messages_by_character(character_id)
+    notebook_data = export_entries_by_character(character_id)
+    summary_data  = export_summaries_by_character(character_id)
+    export_payload = {
+        "export_time": datetime.utcnow().isoformat() + "Z",
+        "character_id": character_id,
+        "chat_history": chat_data,
+        "notebook": notebook_data,
+        "long_term_summaries": summary_data,
+    }
+    filename = f"reverie_export_{character_id[:16]}.json"
+    return Response(
+        content=json.dumps(export_payload, ensure_ascii=False, indent=2),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.delete("/api/character/{character_id}/data")
+async def api_character_delete_data(character_id: str):
+    """
+    删除指定角色卡的全部数据（聊天记录 + 笔记本）。
+    不可恢复，由前端确认弹框后调用。
+    """
+    if not character_id.strip():
+        return Response(content=json.dumps({"error": "character_id 不能为空"}, ensure_ascii=False), status_code=400, media_type="application/json")
+    deleted_msgs     = delete_messages_by_character(character_id)
+    deleted_entries  = delete_entries_by_character(character_id)
+    deleted_summaries = delete_summaries_by_character(character_id)
+    print(f"[Memory] 角色 {character_id} 数据已删除：{deleted_msgs} 条消息，{deleted_entries} 条笔记本条目，{deleted_summaries} 条摘要")
+    return {
+        "ok": True,
+        "deleted_messages": deleted_msgs,
+        "deleted_notebook_entries": deleted_entries,
+        "deleted_summaries": deleted_summaries,
+    }
