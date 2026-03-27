@@ -14,6 +14,7 @@ from pathlib import Path
 import asyncio
 import tempfile
 import uuid
+from typing import Optional
 
 import httpx
 import pyttsx3
@@ -30,6 +31,8 @@ from prompt_builder import (
     WINDOW_PRESETS,
     build_messages,
     build_system_prompt,
+    build_vision_speech_messages,
+    build_screenshot_messages,
 )
 
 from memory import (
@@ -61,6 +64,12 @@ from memory import (
     export_summaries_by_character,
 )
 
+# ── 视觉感知模块 ──────────────────────────────────────────────
+import sys as _sys
+import os as _os
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from vision.vision_system import VisionSystem
+
 # ── 环境变量加载 ───────────────────────────────────────────────
 load_dotenv()
 
@@ -78,11 +87,21 @@ TMP_DIR    = Path(__file__).parent / "tmp_audio"
 TMP_DIR.mkdir(exist_ok=True)
 
 
+# ── 视觉感知全局状态 ──────────────────────────────────────────
+vision_speech_queue: asyncio.Queue = asyncio.Queue()
+vision_system: Optional[VisionSystem] = None
+
+
 # ── FastAPI 生命周期 ───────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global vision_system
     init_memory_system()
+    vision_system = VisionSystem(speech_queue=vision_speech_queue)
+    vision_system.start()
     yield
+    if vision_system:
+        vision_system.stop()
     shutdown_memory_system()
 
 
@@ -95,6 +114,13 @@ current_character    = DEFAULT_CHARACTER
 system_prompt        = build_system_prompt(current_character)
 current_window_index: int = DEFAULT_WINDOW_INDEX
 current_character_id: str = ""   # 当前激活角色卡的 preset.id，角色隔离键
+
+# 关键词快筛：匹配用户请求观察屏幕的意图
+_SCREENSHOT_KEYWORDS = re.compile(
+    r"(看看屏幕|屏幕上|画面|你看到了什么|帮我看看|看一眼|看一下|"
+    r"屏幕怎么了|你看到什么|现在在干什么|帮我看|屏幕里)",
+    re.IGNORECASE,
+)
 
 
 # ── Live2D 模型扫描接口 ────────────────────────────────────────
@@ -245,6 +271,105 @@ def _extract_emotion(text: str) -> str:
     return ""
 
 
+# ── 视觉主动发言辅助函数 ──────────────────────────────
+ 
+# 全局的最近发言记录（防重复用）
+_recent_vision_speeches: list = []
+ 
+ 
+async def _drain_vision_speech(
+    websocket: WebSocket,
+    llm_client,
+    llm_model: str,
+    system_prompt: str,
+    session_id: str,
+    session_character_id: str,
+    history,
+    session_messages: list,
+    # ── 以下是新增参数 ──
+    window_index: int = 1,
+    character_name: str = "",
+):
+    """
+    检查并处理视觉感知主动发言队列中的待发事件。
+    每次最多处理 1 条，避免连续刷屏。
+    """
+    global _recent_vision_speeches
+ 
+    try:
+        trigger = vision_speech_queue.get_nowait()
+    except asyncio.QueueEmpty:
+        return
+ 
+    if trigger.get("session_id") and trigger["session_id"] != session_id:
+        return
+ 
+    try:
+        # 改进：传入 recent_speeches 和 history
+        messages = build_vision_speech_messages(
+            system_prompt,
+            trigger,
+            recent_speeches=_recent_vision_speeches,
+            history=list(history),
+            window_index=window_index,
+            character_id=session_character_id,
+            character_name=character_name,
+        )
+        try:
+            response = await llm_client.chat.completions.create(
+                model=llm_model, messages=messages,
+                max_completion_tokens=200, temperature=0.9,
+            )
+        except Exception:
+            response = await llm_client.chat.completions.create(
+                model=llm_model, messages=messages,
+                max_tokens=200, temperature=0.9,
+            )
+        reply = response.choices[0].message.content.strip()
+        print(f"[Vision] LLM回复（finish_reason={response.choices[0].finish_reason}）: {reply[:50]}")
+    except Exception as e:
+        print(f"[Vision] 主动发言 LLM 调用失败: {e}")
+        return
+ 
+    emotion     = _extract_emotion(reply)
+    clean_reply = re.sub(r'\[(happy|sad|angry|shy|surprised|neutral|sigh)\]', '', reply, flags=re.IGNORECASE)
+    clean_reply = re.sub(r'\[[a-zA-Z_]+\]', '', clean_reply)
+    clean_reply = clean_reply.strip()
+ 
+    # 改进：允许"不说话"（回复 …… 或空）
+    if not clean_reply or clean_reply in ("……", "...", "。"):
+        return
+ 
+    # 改进：记录最近发言，防重复
+    _recent_vision_speeches.append(clean_reply)
+    if len(_recent_vision_speeches) > 5:
+        _recent_vision_speeches.pop(0)
+ 
+    # 写入时间线
+    scene_info = trigger.get("scene_info", {})
+    game_event_msg = TimelineMessage.create(
+        msg_type=MessageType.GAME_EVENT,
+        content=clean_reply,
+        session_id=session_id,
+        character_id=session_character_id,
+        metadata={
+            "emotion":     emotion,
+            "scene_type":  scene_info.get("scene_type", "unknown"),
+            "game_name":   scene_info.get("game_name"),
+            "confidence":  scene_info.get("confidence", "low"),
+            "source":      "vision_proactive",
+            "reason":      trigger.get("reason", ""),
+        },
+    )
+    save_message(game_event_msg)
+    session_messages.append(game_event_msg)
+ 
+    await websocket.send_text(json.dumps({
+        "type":    "vision_proactive_speech",
+        "message": reply,
+    }, ensure_ascii=False))
+
+
 # ── WebSocket 端点 ─────────────────────────────────────────────
 @app.websocket("/ws/chat")
 async def websocket_chat(websocket: WebSocket):
@@ -281,7 +406,26 @@ async def websocket_chat(websocket: WebSocket):
 
     try:
         while True:
-            raw = await websocket.receive_text()
+            # 同时监听用户消息和视觉主动发言队列（1 秒轮询间隔）
+            raw = None
+            try:
+                raw = await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
+            except asyncio.TimeoutError:
+                # 无用户消息 → 检查视觉主动发言队列
+                await _drain_vision_speech(
+                    websocket=websocket,
+                    llm_client=llm_client,
+                    llm_model=LLM_MODEL,
+                    system_prompt=system_prompt,
+                    session_id=session_id,
+                    session_character_id=session_character_id,
+                    history=history,
+                    session_messages=session_messages,
+                    window_index=session_window_index,
+                    character_name=current_character.get("name", ""),
+                )
+                continue
+
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError:
@@ -313,7 +457,17 @@ async def websocket_chat(websocket: WebSocket):
                     new_cid = str(data["character_id"]).strip()
                     current_character_id  = new_cid
                     session_character_id  = new_cid
- 
+
+                # Phase 3: 视觉感知配置
+                if "vision" in data and vision_system:
+                    vision_system.configure(data["vision"])
+                    vision_system.set_main_llm(llm_client, LLM_MODEL)
+                    vision_system.set_session_info(
+                        session_id=session_id,
+                        character_id=session_character_id,
+                        address=current_character.get("address", "你"),
+                    )
+
                 # 步骤⑤：角色/模型切换时同步更新提取器配置
                 extractor.update_config(
                     llm_client=llm_client,
@@ -321,19 +475,23 @@ async def websocket_chat(websocket: WebSocket):
                     character=current_character,
                     character_id=session_character_id,
                 )
-                
+
                 summary_queue.update_config(
                     llm_client=llm_client,
                     model=LLM_MODEL,
                     character=current_character,
                     character_id=session_character_id,
                 )
- 
+
                 await websocket.send_text(json.dumps({"type": "configure_ack", "message": "配置已更新"}, ensure_ascii=False))
                 continue
 
             if msg_type != "chat" or not user_msg:
                 continue
+
+            # Phase 3: 通知视觉系统用户开始交互（打断冷却）
+            if vision_system:
+                vision_system.on_user_message()
 
             user_timeline_msg = TimelineMessage.create(
                 msg_type=MessageType.USER_TEXT,
@@ -343,20 +501,41 @@ async def websocket_chat(websocket: WebSocket):
             )
             save_message(user_timeline_msg)
 
+            # Phase 3: 关键词快筛 — 用户是否请求观察屏幕
+            user_wants_screenshot = bool(_SCREENSHOT_KEYWORDS.search(user_msg))
+            screenshot_info: Optional[dict] = None
+
+            if user_wants_screenshot and vision_system:
+                screenshot_info = await vision_system.capture_for_user()
+
             # 步骤⑥：检索相关摘要，注入 Layer 2
             relevant = retrieve_relevant_summaries(
                 query=user_msg,
                 character_id=session_character_id,
             )
-            messages = build_messages(
-                system_prompt,
-                list(history),
-                user_msg,
-                window_index=session_window_index,
-                character_id=session_character_id,
-                character_name=current_character.get("name", ""),
-                relevant_summaries=relevant,
-            )
+
+            if screenshot_info and not screenshot_info.get("error"):
+                # 直接用截图结果组装 messages
+                messages = build_screenshot_messages(
+                    system_prompt,
+                    list(history),
+                    user_msg,
+                    screenshot_info=screenshot_info,
+                    window_index=session_window_index,
+                    character_id=session_character_id,
+                    character_name=current_character.get("name", ""),
+                    relevant_summaries=relevant,
+                )
+            else:
+                messages = build_messages(
+                    system_prompt,
+                    list(history),
+                    user_msg,
+                    window_index=session_window_index,
+                    character_id=session_character_id,
+                    character_name=current_character.get("name", ""),
+                    relevant_summaries=relevant,
+                )
             
             # 步骤⑥：计算本轮被滑动窗口移出的消息，推入摘要队列
             # 原理：trim_history 后的有效条数 < history 总条数，差值即为被移出部分
@@ -374,7 +553,7 @@ async def websocket_chat(websocket: WebSocket):
                     del session_messages[:evicted_count]
 
             try:
-                response = await llm_client.chat.completions.create(model=LLM_MODEL, messages=messages, max_tokens=150, temperature=0.85)
+                response = await llm_client.chat.completions.create(model=LLM_MODEL, messages=messages, max_tokens=300, temperature=0.85)
                 reply = response.choices[0].message.content.strip()
             except Exception as e:
                 err_str = str(e)
@@ -393,10 +572,35 @@ async def websocket_chat(websocket: WebSocket):
                 await websocket.send_text(json.dumps({"type": "error", "message": friendly}, ensure_ascii=False))
                 continue
 
+            # Phase 3: 检测 [NEED_SCREENSHOT] 标签（LLM 意图兜底检测）
+            if reply.startswith("[NEED_SCREENSHOT]") and vision_system and not screenshot_info:
+                screenshot_info = await vision_system.capture_for_user()
+                if screenshot_info and not screenshot_info.get("error"):
+                    # 用截图结果重新生成回复
+                    messages_with_screen = build_screenshot_messages(
+                        system_prompt,
+                        list(history),
+                        user_msg,
+                        screenshot_info=screenshot_info,
+                        window_index=session_window_index,
+                        character_id=session_character_id,
+                        character_name=current_character.get("name", ""),
+                        relevant_summaries=relevant,
+                    )
+                    try:
+                        response2 = await llm_client.chat.completions.create(
+                            model=LLM_MODEL, messages=messages_with_screen,
+                            max_tokens=300, temperature=0.85,
+                        )
+                        reply = response2.choices[0].message.content.strip()
+                    except Exception:
+                        pass  # 保留原 reply
+
             emotion     = _extract_emotion(reply)
             # 先剥离已知标签，再用兜底正则清除任何残留的 [xxx] 格式未知标签
             clean_reply = re.sub(r'\[(happy|sad|angry|shy|surprised|neutral|sigh)\]', '', reply, flags=re.IGNORECASE)
-            clean_reply = re.sub(r'\[[a-zA-Z]+\]', '', clean_reply)  # 兜底：清除未知标签
+            clean_reply = re.sub(r'\[NEED_SCREENSHOT\]', '', clean_reply, flags=re.IGNORECASE)
+            clean_reply = re.sub(r'\[[a-zA-Z_]+\]', '', clean_reply)  # 兜底：清除未知标签
             clean_reply = clean_reply.strip()
 
             ai_timeline_msg = TimelineMessage.create(
@@ -419,6 +623,10 @@ async def websocket_chat(websocket: WebSocket):
             extractor.on_round_complete(session_messages)
  
             await websocket.send_text(json.dumps({"type": "chat_response", "message": reply}, ensure_ascii=False))
+
+            # Phase 3: 用户消息处理完成，恢复视觉感知的主动发言权
+            if vision_system:
+                vision_system.on_user_message_done()
 
     except WebSocketDisconnect:
         print(f"[WS] 会话 {session_id} 断开（角色：{session_character_id}）")

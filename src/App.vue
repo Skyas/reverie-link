@@ -574,12 +574,18 @@
                 const charCfg = savedChar ? JSON.parse(savedChar) : {};
                 const savedWindowIdx = parseInt(localStorage.getItem("rl-memory-window") ?? "1", 10);
                 const savedCharId = localStorage.getItem("rl-active-preset-id") ?? "";
+                let visionCfg: object | undefined;
+                try {
+                    const v = localStorage.getItem("rl-vision");
+                    visionCfg = v ? JSON.parse(v) : undefined;
+                } catch { visionCfg = undefined; }
                 ws!.send(JSON.stringify({
                     type: "configure",
                     llm: llmCfg,
                     character: charCfg,
                     memory_window: isNaN(savedWindowIdx) ? 1 : savedWindowIdx,
                     character_id: savedCharId,
+                    ...(visionCfg ? { vision: visionCfg } : {}),
                 }));
             }
         };
@@ -598,6 +604,15 @@
                 showBubbleWithText(cleanText);
                 // ② 语音播放（配置未启用时静默跳过）
                 speakText(cleanText);
+
+            } else if (data.type === "vision_proactive_speech") {
+                // 视觉感知主动发言（桌宠自己说话，非回复用户）
+                if (!isThinking.value) {
+                    const { cleanText, emotion } = parseEmotion(data.message);
+                    if (emotion) setEmotion(emotion);
+                    showBubbleWithText(cleanText);
+                    speakText(cleanText);
+                }
 
             } else if (data.type === "error") {
                 isThinking.value = false;
@@ -712,7 +727,7 @@
 
         // 事件监听
         unlisten.push(await listen("config-changed", (e) => {
-            const payload = e.payload as { llm?: object; character?: object; memory_window?: number; character_id?: string };
+            const payload = e.payload as { llm?: object; character?: object; memory_window?: number; character_id?: string; vision?: object };
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({
                     type: "configure",
@@ -720,8 +735,9 @@
                     character: payload.character ?? {},
                     memory_window: payload.memory_window ?? parseInt(localStorage.getItem("rl-memory-window") ?? "1", 10),
                     character_id: payload.character_id ?? localStorage.getItem("rl-active-preset-id") ?? "",
-        }));
-    }
+                    ...(payload.vision ? { vision: payload.vision } : {}),
+                }));
+            }
         }));
         unlisten.push(await listen("mascot-hover", (e) => {
             showUnlock.value = e.payload as boolean;
