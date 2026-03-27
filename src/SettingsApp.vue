@@ -192,6 +192,64 @@
         showMsg("✓ 尺寸已保存，重启后生效");
     }
 
+    // ── Phase 3: 视觉感知配置 ─────────────────────────────────────
+    const VISION_TALK_OPTIONS = [
+        { value: 0, label: "话少",        desc: "阈值 30，安静" },
+        { value: 1, label: "适中（默认）", desc: "阈值 20，平衡" },
+        { value: 2, label: "话多",        desc: "阈值 12，活跃" },
+    ];
+
+    function _loadVisionCfg() {
+        try { return JSON.parse(localStorage.getItem("rl-vision") || "{}"); } catch { return {}; }
+    }
+    const _vc = _loadVisionCfg();
+
+    const visionEnabled      = ref<boolean>(!!_vc.enabled);
+    const visionVlmBaseUrl   = ref<string>(_vc.vlm_base_url   ?? "https://open.bigmodel.cn/api/paas/v4/");
+    const visionVlmApiKey    = ref<string>(_vc.vlm_api_key    ?? "");
+    const visionVlmModel     = ref<string>(_vc.vlm_model      ?? "glm-4v-flash");
+    const visionTalkLevel    = ref<number>(_vc.talk_level      ?? 1);
+    const visionCooldown     = ref<number>(_vc.cooldown_seconds ?? 20);
+    const visionManualGameMode = ref<boolean>(!!_vc.manual_game_mode);
+
+    async function saveVision() {
+        const cfg = {
+            enabled:          visionEnabled.value,
+            vlm_base_url:     visionVlmBaseUrl.value.trim(),
+            vlm_api_key:      visionVlmApiKey.value.trim(),
+            vlm_model:        visionVlmModel.value.trim() || "glm-4v-flash",
+            talk_level:       visionTalkLevel.value,
+            cooldown_seconds: visionCooldown.value,
+            manual_game_mode: visionManualGameMode.value,
+        };
+        localStorage.setItem("rl-vision", JSON.stringify(cfg));
+        const llmCfg  = JSON.parse(localStorage.getItem("rl-llm")      || "{}");
+        const charCfg = JSON.parse(localStorage.getItem("rl-character") || "{}");
+        await sendConfigToBackend(llmCfg, charCfg, { vision: cfg });
+        showMsg("✓ 视觉感知配置已保存");
+    }
+
+    // ── 全局设置：记忆窗口档位 ────────────────────────────────────
+    const MEMORY_WINDOW_OPTIONS = [
+        { index: 0, label: "极速省流",    desc: "3分钟 / 5轮",  token: "~2,000 tokens",  warn: false },
+        { index: 1, label: "均衡（默认）", desc: "8分钟 / 12轮", token: "~5,000 tokens",  warn: false },
+        { index: 2, label: "沉浸",        desc: "15分钟 / 20轮", token: "~8,000 tokens",  warn: false },
+        { index: 3, label: "深度",        desc: "20分钟 / 28轮", token: "~11,000 tokens", warn: true  },
+        { index: 4, label: "极限",        desc: "25分钟 / 35轮", token: "~14,000 tokens", warn: true  },
+    ];
+    const memoryWindowIndex = ref<number>(
+        parseInt(localStorage.getItem("rl-memory-window") ?? "1", 10)
+    );
+ 
+    async function applyMemoryWindow(index: number) {
+        memoryWindowIndex.value = index;
+        localStorage.setItem("rl-memory-window", String(index));
+        const llmCfg  = JSON.parse(localStorage.getItem("rl-llm")      || "{}");
+        const charCfg = JSON.parse(localStorage.getItem("rl-character") || "{}");
+        await sendConfigToBackend(llmCfg, charCfg);
+        showMsg(`✓ 记忆跨度已切换至「${MEMORY_WINDOW_OPTIONS[index].label}」`);
+    }
+
     // ── 语音配置（ElevenLabs + 本地 RVC）────────────────────────
     const TTS_CONFIG_KEY = "rl-tts";
 
@@ -328,13 +386,66 @@
         showMsg("✓ 预设已保存");
     }
 
-    function deletePreset(id: string) {
+    // ── 删除角色卡弹框状态 ─────────────────────────────────────
+    const showDeleteDialog    = ref(false);
+    const deleteTargetId      = ref("");
+    const deleteTargetName    = ref("");
+    const deleteDataLoading   = ref(false);
+ 
+    function requestDeletePreset(id: string) {
         if (id === "default-rei") { showMsg("默认预设不可删除", "warn"); return; }
+        const preset = presets.value.find(p => p.id === id);
+        if (!preset) return;
+        deleteTargetId.value   = id;
+        deleteTargetName.value = preset.name;
+        showDeleteDialog.value = true;
+    }
+ 
+    async function confirmDeleteWithExport() {
+        // 先导出，再删除
+        deleteDataLoading.value = true;
+        try {
+            const res = await fetch(`http://localhost:18000/api/character/${deleteTargetId.value}/export`);
+            if (res.ok) {
+                const blob = await res.blob();
+                const url  = URL.createObjectURL(blob);
+                const a    = document.createElement("a");
+                a.href     = url;
+                a.download = `reverie_export_${deleteTargetId.value.slice(0, 16)}.json`;
+                a.click();
+                URL.revokeObjectURL(url);
+            }
+        } catch (e) {
+            console.warn("[export] failed:", e);
+        }
+        await _doDeletePreset(deleteTargetId.value);
+    }
+ 
+    async function confirmDeleteDirect() {
+        // 直接删除，不导出
+        deleteDataLoading.value = true;
+        await _doDeletePreset(deleteTargetId.value);
+    }
+ 
+    async function _doDeletePreset(id: string) {
+        // 1. 删除后端数据
+        try {
+            await fetch(`http://localhost:18000/api/character/${id}/data`, { method: "DELETE" });
+        } catch (e) {
+            console.warn("[delete data] failed:", e);
+        }
+        // 2. 删除本地预设列表
         presets.value = presets.value.filter(p => p.id !== id);
         if (activePreset.value?.id === id) loadPresetToForm(presets.value[0]);
-        if (activePresetId.value === id) activePresetId.value = "";
+        if (activePresetId.value === id) {
+            activePresetId.value = presets.value[0]?.id ?? "";
+            localStorage.setItem("rl-active-preset-id", activePresetId.value);
+        }
         savePresets();
-        showMsg("已删除");
+        // 3. 关闭弹框
+        showDeleteDialog.value  = false;
+        deleteDataLoading.value = false;
+        showMsg(`「${deleteTargetName.value}」及其所有数据已删除`);
     }
 
     async function activatePreset(preset: CharacterPreset) {
@@ -366,10 +477,16 @@
     }
 
     /** 通知 App.vue 更新配置（通过 Tauri 事件，由 App.vue 经自己的 WS 连接发送 configure） */
-    async function sendConfigToBackend(llmCfg: object, charCfg: object) {
+    async function sendConfigToBackend(llmCfg: object, charCfg: object, extraPayload?: object) {
         try {
             const { emit } = await import("@tauri-apps/api/event");
-            await emit("config-changed", { llm: llmCfg, character: charCfg });
+            await emit("config-changed", {
+                llm: llmCfg,
+                character: charCfg,
+                character_id: activePresetId.value,
+                memory_window: parseInt(localStorage.getItem("rl-memory-window") ?? "1", 10),
+                ...extraPayload,
+            });
         } catch (e) {
             console.warn("[config] emit failed:", e);
         }
@@ -445,6 +562,185 @@
             tts.rvc_edge_voice = d.rvc_edge_voice ?? "zh-CN-XiaoxiaoNeural";
         }
     });
+
+    // ══════════════════════════════════════════════════════════════
+    // 步骤⑧：笔记本界面
+    // ══════════════════════════════════════════════════════════════
+ 
+    // ── 笔记本弹窗状态 ──────────────────────────────────────────
+    const showNotebook      = ref(false);
+    const notebookTab       = ref<"manual" | "auto">("manual");
+    const notebookLoading   = ref(false);
+ 
+    // ── 笔记本当前角色名（动态读取）──────────────────────────────
+    const notebookCharName = computed(() => {
+        const p = presets.value.find(p => p.id === activePresetId.value);
+        return p?.name ?? "角色";
+    });
+ 
+    // ── 手动区状态 ───────────────────────────────────────────────
+    interface NotebookEntry { id: string; source: string; content: string; tags: string[]; created_at: string; updated_at: string; }
+ 
+    const manualEntries    = ref<NotebookEntry[]>([]);
+    const manualTotal      = ref(0);
+    const manualPage       = ref(1);
+    const manualTotalPages = ref(1);
+    const manualKeyword    = ref("");
+    const manualSearchBy   = ref<"content" | "tag">("content");
+ 
+    // 新增/编辑表单
+    const showEntryForm  = ref(false);
+    const editingEntryId = ref<string | null>(null);
+    const entryContent   = ref("");
+    const entryTagsRaw   = ref("");   // 逗号分隔的标签字符串
+ 
+    // ── 自动区状态 ───────────────────────────────────────────────
+    const autoEntries    = ref<NotebookEntry[]>([]);
+    const autoTotal      = ref(0);
+    const autoPage       = ref(1);
+    const autoTotalPages = ref(1);
+    const autoKeyword    = ref("");
+    const autoSearchBy   = ref<"content" | "tag">("content");
+ 
+    // ── 跳页输入 ────────────────────────────────────────────────
+    const manualJumpPage = ref<number | "">(1);
+    const autoJumpPage   = ref<number | "">(1);
+ 
+    // ── 打开笔记本 ───────────────────────────────────────────────
+    async function openNotebook() {
+        showNotebook.value = true;
+        notebookTab.value  = "manual";
+        await fetchManualEntries(1);
+        await fetchAutoEntries(1);
+    }
+ 
+    // ── 获取手动区条目 ───────────────────────────────────────────
+    async function fetchManualEntries(page: number) {
+        notebookLoading.value = true;
+        try {
+            const params = new URLSearchParams({
+                source: "manual",
+                page: String(page),
+                page_size: "10",
+                character_id: activePresetId.value,
+            });
+            if (manualKeyword.value.trim()) {
+                params.set("keyword", manualKeyword.value.trim());
+                params.set("search_by", manualSearchBy.value);
+            }
+            const res  = await fetch(`http://localhost:18000/api/notebook/entries?${params}`);
+            const data = await res.json();
+            manualEntries.value    = data.items ?? [];
+            manualTotal.value      = data.total ?? 0;
+            manualPage.value       = data.page ?? 1;
+            manualTotalPages.value = data.total_pages ?? 1;
+            manualJumpPage.value   = manualPage.value;
+        } catch {
+            showMsg("获取备忘录失败，请确认后端已启动", "warn");
+        } finally {
+            notebookLoading.value = false;
+        }
+    }
+ 
+    // ── 获取自动区条目 ───────────────────────────────────────────
+    async function fetchAutoEntries(page: number) {
+        notebookLoading.value = true;
+        try {
+            const params = new URLSearchParams({
+                source: "auto",
+                page: String(page),
+                page_size: "10",
+                character_id: activePresetId.value,
+            });
+            if (autoKeyword.value.trim()) {
+                params.set("keyword", autoKeyword.value.trim());
+                params.set("search_by", autoSearchBy.value);
+            }
+            const res  = await fetch(`http://localhost:18000/api/notebook/entries?${params}`);
+            const data = await res.json();
+            autoEntries.value    = data.items ?? [];
+            autoTotal.value      = data.total ?? 0;
+            autoPage.value       = data.page ?? 1;
+            autoTotalPages.value = data.total_pages ?? 1;
+            autoJumpPage.value   = autoPage.value;
+        } catch {
+            showMsg("获取日记本失败，请确认后端已启动", "warn");
+        } finally {
+            notebookLoading.value = false;
+        }
+    }
+ 
+    // ── 手动区：新增/编辑 ────────────────────────────────────────
+    function openNewEntry() {
+        editingEntryId.value = null;
+        entryContent.value   = "";
+        entryTagsRaw.value   = "";
+        showEntryForm.value  = true;
+    }
+ 
+    function openEditEntry(entry: NotebookEntry) {
+        editingEntryId.value = entry.id;
+        entryContent.value   = entry.content;
+        entryTagsRaw.value   = entry.tags.join("、");
+        showEntryForm.value  = true;
+    }
+ 
+    async function saveEntry() {
+        const content = entryContent.value.trim();
+        if (!content) { showMsg("内容不能为空", "warn"); return; }
+        const tags = entryTagsRaw.value.split(/[,，、]/).map(t => t.trim()).filter(Boolean);
+ 
+        try {
+            if (editingEntryId.value) {
+                // 编辑
+                await fetch(`http://localhost:18000/api/notebook/entries/${editingEntryId.value}`, {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ content, tags }),
+                });
+                showMsg("✓ 已更新");
+            } else {
+                // 新增
+                await fetch("http://localhost:18000/api/notebook/entries", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ content, tags, character_id: activePresetId.value }),
+                });
+                showMsg("✓ 已添加");
+            }
+            showEntryForm.value = false;
+            await fetchManualEntries(manualPage.value);
+        } catch {
+            showMsg("操作失败", "warn");
+        }
+    }
+ 
+    // ── 删除条目（手动区和自动区均可）───────────────────────────
+    async function deleteEntry(id: string, source: "manual" | "auto") {
+        try {
+            await fetch(`http://localhost:18000/api/notebook/entries/${id}`, { method: "DELETE" });
+            showMsg("已删除");
+            if (source === "manual") await fetchManualEntries(manualPage.value);
+            else                     await fetchAutoEntries(autoPage.value);
+        } catch {
+            showMsg("删除失败", "warn");
+        }
+    }
+ 
+    // ── 搜索 ────────────────────────────────────────────────────
+    async function searchManual() { await fetchManualEntries(1); }
+    async function searchAuto()   { await fetchAutoEntries(1); }
+ 
+    // ── 跳页 ────────────────────────────────────────────────────
+    async function jumpManualPage() {
+        const p = Number(manualJumpPage.value);
+        if (p >= 1 && p <= manualTotalPages.value) await fetchManualEntries(p);
+    }
+    async function jumpAutoPage() {
+        const p = Number(autoJumpPage.value);
+        if (p >= 1 && p <= autoTotalPages.value) await fetchAutoEntries(p);
+    }
+
 </script>
 
 <template>
@@ -635,14 +931,23 @@
                             </div>
                             <div class="preset-actions">
                                 <button class="preset-activate-btn" @click.stop="activatePreset(p)" title="激活使用">▶</button>
-                                <button class="preset-delete-btn" @click.stop="deletePreset(p.id)" :disabled="p.id === 'default-rei'" title="删除">×</button>
+                                <button class="preset-delete-btn" @click.stop="requestDeletePreset(p.id)" :disabled="p.id === 'default-rei'" title="删除">×</button>
                             </div>
                         </div>
                     </div>
                 </div>
-
+                
                 <div class="divider"></div>
-                <div class="form-section-label">{{ activePreset ? `编辑：${activePreset.name}` : "新建角色预设" }}</div>
+
+                <!-- 笔记本入口 -->
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+                    <div class="form-section-label" style="margin-bottom:0;">{{ activePreset ? `编辑：${activePreset.name}` : "新建角色预设" }}</div>
+                    <button class="save-btn"
+                            style="padding:6px 14px;font-size:12px;"
+                            @click="openNotebook">
+                        📓 {{ notebookCharName }}的笔记本
+                    </button>
+                </div>
 
                 <div class="avatar-upload-row">
                     <div class="avatar-preview" @click="triggerAvatarUpload">
@@ -805,26 +1110,119 @@
 
                 <div class="divider"></div>
 
-                <!-- Phase 3 占位 -->
-                <div class="global-section global-section-disabled">
-                    <div class="global-section-title">🎮 游戏感知 <span class="coming-badge">Phase 3</span></div>
-                    <label class="toggle-row">
-                        <span class="field-label">启用游戏感知</span>
-                        <input type="checkbox" disabled />
+                <!-- Phase 3: 视觉感知 -->
+                <div class="global-section">
+                    <div class="global-section-title">🎮 视觉感知</div>
+
+                    <!-- 总开关 -->
+                    <label class="toggle-row" style="margin-bottom:10px;">
+                        <span class="field-label">启用视觉感知</span>
+                        <input type="checkbox" v-model="visionEnabled" @change="saveVision" />
                     </label>
+
+                    <!-- 隐私说明 -->
+                    <p class="field-hint" style="color:var(--c-text-soft);margin-bottom:12px;">
+                        🔒 隐私说明：截图仅在内存中存在，用于实时分析后立即释放，永不保存到磁盘。
+                    </p>
+
+                    <template v-if="visionEnabled">
+                        <!-- VLM 配置 -->
+                        <div class="field-group" style="margin-bottom:8px;">
+                            <label class="field-label">VLM API Base URL</label>
+                            <input class="field-input" v-model="visionVlmBaseUrl"
+                                   placeholder="https://open.bigmodel.cn/api/paas/v4/" />
+                        </div>
+                        <div class="field-group" style="margin-bottom:8px;">
+                            <label class="field-label">VLM API Key</label>
+                            <input class="field-input" type="password" v-model="visionVlmApiKey"
+                                   placeholder="填写 VLM API Key（如 GLM-4V-Flash）" />
+                        </div>
+                        <div class="field-group" style="margin-bottom:12px;">
+                            <label class="field-label">VLM 模型名称</label>
+                            <input class="field-input" v-model="visionVlmModel"
+                                   placeholder="glm-4v-flash" />
+                        </div>
+
+                        <!-- VLM 不可用提示 -->
+                        <div v-if="visionEnabled && !visionVlmApiKey"
+                             style="background:#fffbe6;border:1px solid #f0c040;border-radius:6px;
+                                    padding:8px 12px;font-size:12px;color:#8a6000;margin-bottom:12px;">
+                            ⚠️ 视觉模型未配置或不可用。请填写 VLM API Key，或在「AI 模型」Tab 配置支持多模态的文本模型（如 GPT-4o）。
+                        </div>
+
+                        <!-- 话痨程度 -->
+                        <div class="field-group" style="margin-bottom:12px;">
+                            <label class="field-label">话痨程度</label>
+                            <div class="size-options" style="gap:8px;margin-top:6px;">
+                                <div v-for="opt in VISION_TALK_OPTIONS" :key="opt.value"
+                                     class="size-card"
+                                     :class="{ active: visionTalkLevel === opt.value }"
+                                     @click="visionTalkLevel = opt.value; saveVision()">
+                                    <div class="size-label">{{ opt.label }}</div>
+                                    <div class="size-desc">{{ opt.desc }}</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 冷却时间 -->
+                        <div class="field-group" style="margin-bottom:12px;">
+                            <label class="field-label">
+                                主动发言冷却
+                                <span class="field-note">{{ visionCooldown }} 秒</span>
+                            </label>
+                            <input type="range" class="field-range"
+                                   min="5" max="120" step="5"
+                                   v-model.number="visionCooldown"
+                                   @change="saveVision" />
+                        </div>
+
+                        <!-- 手动观战模式 -->
+                        <label class="toggle-row" style="margin-bottom:12px;">
+                            <span class="field-label">
+                                手动观战模式
+                                <span class="field-note">强制标记当前为游戏场景</span>
+                            </span>
+                            <input type="checkbox" v-model="visionManualGameMode" @change="saveVision" />
+                        </label>
+
+                        <!-- 保存按钮 -->
+                        <div class="action-row">
+                            <button class="save-btn" @click="saveVision">保存视觉感知配置</button>
+                        </div>
+                    </template>
                 </div>
 
                 <div class="divider"></div>
 
-                <div class="global-section global-section-disabled">
-                    <div class="global-section-title">🧠 记忆设置 <span class="coming-badge">Phase 3</span></div>
+                <div class="global-section">
+                    <div class="global-section-title">🧠 记忆设置</div>
                     <div class="field-group">
                         <label class="field-label">短期记忆跨度</label>
-                        <input type="range" class="field-range" disabled min="1" max="5" value="2" />
-                        <p class="field-hint">⏳ 记忆跨度越长，聊天连贯性越好，但 API Token 消耗也越高。</p>
+                        <p class="field-hint" style="margin-bottom: 10px;">
+                            ⏳ 记忆跨度越长，聊天连贯性越好，但 API Token 消耗与回复延迟也会增加。
+                        </p>
+                        <div class="memory-window-options">
+                            <div
+                                v-for="opt in MEMORY_WINDOW_OPTIONS"
+                                :key="opt.index"
+                                class="memory-window-card"
+                                :class="{ active: memoryWindowIndex === opt.index }"
+                                @click="applyMemoryWindow(opt.index)"
+                            >
+                                <div class="memory-window-label">{{ opt.label }}</div>
+                                <div class="memory-window-desc">{{ opt.desc }}</div>
+                                <div class="memory-window-token" :class="{ warn: opt.warn }">
+                                    {{ opt.token }}
+                                    <span v-if="opt.warn" style="margin-left:4px;">⚠️</span>
+                                </div>
+                            </div>
+                        </div>
+                        <p v-if="MEMORY_WINDOW_OPTIONS[memoryWindowIndex].warn" class="field-hint" style="margin-top:8px;color:#C08000;">
+                            ⚠️ Token 消耗较高，建议搭配高性能模型使用。
+                        </p>
                     </div>
                 </div>
-
+ 
             </div>
         </div>
 
@@ -845,6 +1243,195 @@
             </div>
         </transition>
 
+        <!-- 删除角色卡确认弹框 -->
+        <transition name="dialog">
+            <div v-if="showDeleteDialog" class="dialog-overlay" @click.self="showDeleteDialog = false">
+                <div class="dialog-box">
+                    <div class="dialog-title">删除「{{ deleteTargetName }}」</div>
+                    <div class="dialog-body">
+                        <p style="font-size:13px;color:var(--c-text);line-height:1.6;">
+                            删除角色卡将同时删除与她相关的所有
+                            <strong>聊天记录</strong>和<strong>记忆数据</strong>，此操作不可恢复。
+                        </p>
+                        <p style="font-size:12px;color:var(--c-text-soft);margin-top:6px;">
+                            如需保留数据，请先选择「导出后删除」。
+                        </p>
+                    </div>
+                    <div class="dialog-actions" style="flex-direction:column;gap:8px;">
+                        <button class="dialog-confirm"
+                                style="width:100%;background:linear-gradient(135deg,#7ec8e3,#b0d4f1);"
+                                :disabled="deleteDataLoading"
+                                @click="confirmDeleteWithExport">
+                            {{ deleteDataLoading ? "处理中…" : "📥 导出后删除" }}
+                        </button>
+                        <button class="dialog-confirm"
+                                style="width:100%;background:linear-gradient(135deg,#f28b82,#e06666);"
+                                :disabled="deleteDataLoading"
+                                @click="confirmDeleteDirect">
+                            {{ deleteDataLoading ? "处理中…" : "🗑️ 直接删除" }}
+                        </button>
+                        <button class="dialog-cancel"
+                                style="width:100%;text-align:center;"
+                                :disabled="deleteDataLoading"
+                                @click="showDeleteDialog = false">
+                            取消
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </transition>
+
+        <!-- ══ 笔记本弹窗 ══════════════════════════════════════════ -->
+        <transition name="dialog">
+            <div v-if="showNotebook" class="notebook-overlay" @click.self="showNotebook = false">
+                <div class="notebook-panel">
+ 
+                    <!-- 标题栏 -->
+                    <div class="notebook-header">
+                        <span class="notebook-title">📓 {{ notebookCharName }}的笔记本</span>
+                        <button class="notebook-close" @click="showNotebook = false">×</button>
+                    </div>
+ 
+                    <!-- Tab 切换 -->
+                    <div class="notebook-tabs">
+                        <button class="nb-tab-btn"
+                                :class="{ active: notebookTab === 'manual' }"
+                                @click="notebookTab = 'manual'">
+                            我的备忘录
+                        </button>
+                        <button class="nb-tab-btn"
+                                :class="{ active: notebookTab === 'auto' }"
+                                @click="notebookTab = 'auto'">
+                            {{ notebookCharName }}的日记本
+                        </button>
+                    </div>
+ 
+                    <!-- 内容区 -->
+                    <div class="notebook-content">
+ 
+                        <!-- ── 手动区 ── -->
+                        <div v-if="notebookTab === 'manual'">
+                            <!-- 搜索栏 -->
+                            <div class="nb-search-row">
+                                <input class="nb-search-input" v-model="manualKeyword"
+                                       placeholder="搜索…" @keydown.enter="searchManual" />
+                                <select class="nb-search-by" v-model="manualSearchBy">
+                                    <option value="content">按内容</option>
+                                    <option value="tag">按标签</option>
+                                </select>
+                                <button class="nb-search-btn" @click="searchManual">搜索</button>
+                                <button class="nb-add-btn" @click="openNewEntry">+ 新增</button>
+                            </div>
+ 
+                            <!-- 条目列表 -->
+                            <div v-if="notebookLoading" class="nb-loading">加载中…</div>
+                            <div v-else-if="manualEntries.length === 0" class="nb-empty">
+                                暂无条目，点击「+ 新增」添加
+                            </div>
+                            <div v-else class="nb-entries">
+                                <div v-for="e in manualEntries" :key="e.id" class="nb-entry-card">
+                                    <div class="nb-entry-content">{{ e.content }}</div>
+                                    <div class="nb-entry-tags">
+                                        <span v-for="t in e.tags" :key="t" class="nb-tag">{{ t }}</span>
+                                    </div>
+                                    <div class="nb-entry-actions">
+                                        <button class="nb-edit-btn" @click="openEditEntry(e)">编辑</button>
+                                        <button class="nb-del-btn" @click="deleteEntry(e.id, 'manual')">删除</button>
+                                    </div>
+                                </div>
+                            </div>
+ 
+                            <!-- 分页 -->
+                            <div v-if="manualTotalPages > 1" class="nb-pagination">
+                                <button class="nb-page-btn" :disabled="manualPage <= 1" @click="fetchManualEntries(1)">首页</button>
+                                <button class="nb-page-btn" :disabled="manualPage <= 1" @click="fetchManualEntries(manualPage - 1)">上一页</button>
+                                <span class="nb-page-info">{{ manualPage }} / {{ manualTotalPages }}</span>
+                                <button class="nb-page-btn" :disabled="manualPage >= manualTotalPages" @click="fetchManualEntries(manualPage + 1)">下一页</button>
+                                <button class="nb-page-btn" :disabled="manualPage >= manualTotalPages" @click="fetchManualEntries(manualTotalPages)">尾页</button>
+                                <input class="nb-jump-input" v-model.number="manualJumpPage" type="number" min="1" :max="manualTotalPages" @keydown.enter="jumpManualPage" />
+                                <button class="nb-page-btn" @click="jumpManualPage">跳转</button>
+                            </div>
+ 
+                            <!-- 底部提示 -->
+                            <p class="nb-file-hint">💡 需要批量编辑？数据文件位于 <code>data/notebook.db</code></p>
+                        </div>
+ 
+                        <!-- ── 自动区 ── -->
+                        <div v-if="notebookTab === 'auto'">
+                            <!-- 搜索栏 -->
+                            <div class="nb-search-row">
+                                <input class="nb-search-input" v-model="autoKeyword"
+                                       placeholder="搜索…" @keydown.enter="searchAuto" />
+                                <select class="nb-search-by" v-model="autoSearchBy">
+                                    <option value="content">按内容</option>
+                                    <option value="tag">按标签</option>
+                                </select>
+                                <button class="nb-search-btn" @click="searchAuto">搜索</button>
+                            </div>
+ 
+                            <!-- 条目列表 -->
+                            <div v-if="notebookLoading" class="nb-loading">加载中…</div>
+                            <div v-else-if="autoEntries.length === 0" class="nb-empty">
+                                {{ notebookCharName }}还没有记录任何事情
+                            </div>
+                            <div v-else class="nb-entries">
+                                <div v-for="e in autoEntries" :key="e.id" class="nb-entry-card nb-entry-auto">
+                                    <div class="nb-entry-content">{{ e.content }}</div>
+                                    <div class="nb-entry-tags">
+                                        <span v-for="t in e.tags" :key="t" class="nb-tag">{{ t }}</span>
+                                    </div>
+                                    <div class="nb-entry-actions">
+                                        <button class="nb-del-btn" @click="deleteEntry(e.id, 'auto')" title="删除表示「这条记错了」">删除</button>
+                                    </div>
+                                </div>
+                            </div>
+ 
+                            <!-- 分页 -->
+                            <div v-if="autoTotalPages > 1" class="nb-pagination">
+                                <button class="nb-page-btn" :disabled="autoPage <= 1" @click="fetchAutoEntries(1)">首页</button>
+                                <button class="nb-page-btn" :disabled="autoPage <= 1" @click="fetchAutoEntries(autoPage - 1)">上一页</button>
+                                <span class="nb-page-info">{{ autoPage }} / {{ autoTotalPages }}</span>
+                                <button class="nb-page-btn" :disabled="autoPage >= autoTotalPages" @click="fetchAutoEntries(autoPage + 1)">下一页</button>
+                                <button class="nb-page-btn" :disabled="autoPage >= autoTotalPages" @click="fetchAutoEntries(autoTotalPages)">尾页</button>
+                                <input class="nb-jump-input" v-model.number="autoJumpPage" type="number" min="1" :max="autoTotalPages" @keydown.enter="jumpAutoPage" />
+                                <button class="nb-page-btn" @click="jumpAutoPage">跳转</button>
+                            </div>
+ 
+                            <!-- 底部提示 -->
+                            <p class="nb-file-hint">💡 数据文件位于 <code>data/notebook.db</code></p>
+                        </div>
+ 
+                    </div>
+                </div>
+            </div>
+        </transition>
+ 
+        <!-- 新增/编辑条目弹框 -->
+        <transition name="dialog">
+            <div v-if="showEntryForm" class="dialog-overlay" @click.self="showEntryForm = false">
+                <div class="dialog-box" style="width:360px;">
+                    <div class="dialog-title">{{ editingEntryId ? "编辑条目" : "新增条目" }}</div>
+                    <div class="dialog-body" style="gap:10px;">
+                        <div>
+                            <label class="field-label">内容 <span class="required">*</span></label>
+                            <textarea class="field-input" v-model="entryContent"
+                                      rows="3" placeholder="例如：喜欢打羽毛球"
+                                      style="resize:none;margin-top:4px;" />
+                        </div>
+                        <div>
+                            <label class="field-label">标签 <span class="field-note">用逗号或顿号分隔</span></label>
+                            <input class="field-input" v-model="entryTagsRaw"
+                                   placeholder="例如：运动、羽毛球" style="margin-top:4px;" />
+                        </div>
+                    </div>
+                    <div class="dialog-actions">
+                        <button class="dialog-cancel" @click="showEntryForm = false">取消</button>
+                        <button class="dialog-confirm" @click="saveEntry">保存</button>
+                    </div>
+                </div>
+            </div>
+        </transition>
+ 
     </div>
 </template>
 
@@ -1680,7 +2267,7 @@
         display: flex;
         align-items: center;
         justify-content: center;
-        z-index: 100;
+        z-index: 200;
     }
 
     .dialog-box {
@@ -1886,5 +2473,341 @@
     .rvc-voice-card.index-warn.active {
         border-color: #E0A000;
         box-shadow: 0 0 0 3px rgba(240,192,0,0.2);
+    }
+
+    /* ── 记忆窗口档位选择 ─────────────────────────────────────── */
+    .memory-window-options {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+    }
+ 
+    .memory-window-card {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 14px;
+        border: 1.5px solid var(--c-border);
+        border-radius: 10px;
+        cursor: pointer;
+        background: var(--c-surface);
+        transition: border-color 0.2s, box-shadow 0.2s;
+    }
+ 
+        .memory-window-card:hover {
+            border-color: var(--c-pink-mid);
+        }
+ 
+        .memory-window-card.active {
+            border-color: var(--c-blue);
+            box-shadow: 0 0 0 3px var(--c-blue-light);
+            background: linear-gradient(135deg, rgba(197,232,244,0.15), rgba(255,183,197,0.1));
+        }
+ 
+    .memory-window-label {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--c-text);
+        min-width: 80px;
+        flex-shrink: 0;
+    }
+ 
+    .memory-window-desc {
+        font-size: 12px;
+        color: var(--c-text-soft);
+        flex: 1;
+    }
+ 
+    .memory-window-token {
+        font-size: 11px;
+        color: var(--c-text-soft);
+        text-align: right;
+        flex-shrink: 0;
+    }
+ 
+    .memory-window-token.warn {
+        color: #C08000;
+        font-weight: 500;
+    }
+    
+    /* ── 笔记本弹窗 ──────────────────────────────────────────── */
+    .notebook-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(100,80,120,0.3);
+        backdrop-filter: blur(6px);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 150;
+    }
+ 
+    .notebook-panel {
+        width: 560px;
+        max-height: 80vh;
+        background: var(--c-bg);
+        border-radius: 20px;
+        box-shadow: 0 12px 48px rgba(126,87,194,0.2);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+    }
+ 
+    .notebook-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 16px 20px 12px;
+        border-bottom: 1.5px solid var(--c-border);
+        flex-shrink: 0;
+    }
+ 
+    .notebook-title {
+        font-size: 15px;
+        font-weight: 700;
+        color: var(--c-text);
+    }
+ 
+    .notebook-close {
+        width: 28px;
+        height: 28px;
+        border: none;
+        border-radius: 50%;
+        background: var(--c-pink-light);
+        color: var(--c-text-soft);
+        font-size: 16px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: background 0.2s;
+    }
+ 
+        .notebook-close:hover { background: var(--c-pink); color: white; }
+ 
+    .notebook-tabs {
+        display: flex;
+        gap: 0;
+        padding: 10px 20px 0;
+        flex-shrink: 0;
+    }
+ 
+    .nb-tab-btn {
+        padding: 7px 18px;
+        border: 1.5px solid var(--c-border);
+        border-bottom: none;
+        border-radius: 10px 10px 0 0;
+        background: var(--c-pink-light);
+        color: var(--c-text-soft);
+        font-size: 13px;
+        font-family: inherit;
+        cursor: pointer;
+        transition: background 0.2s, color 0.2s;
+    }
+ 
+        .nb-tab-btn.active {
+            background: var(--c-surface);
+            color: var(--c-text);
+            font-weight: 600;
+        }
+ 
+    .notebook-content {
+        flex: 1;
+        overflow-y: auto;
+        padding: 14px 20px 16px;
+        background: var(--c-surface);
+        border-top: 1.5px solid var(--c-border);
+    }
+ 
+    /* 搜索栏 */
+    .nb-search-row {
+        display: flex;
+        gap: 6px;
+        margin-bottom: 12px;
+        align-items: center;
+    }
+ 
+    .nb-search-input {
+        flex: 1;
+        height: 32px;
+        border: 1.5px solid var(--c-border);
+        border-radius: 8px;
+        padding: 0 10px;
+        font-size: 13px;
+        font-family: inherit;
+        color: var(--c-text);
+        background: var(--c-bg);
+        outline: none;
+    }
+ 
+        .nb-search-input:focus { border-color: var(--c-blue); }
+ 
+    .nb-search-by {
+        height: 32px;
+        border: 1.5px solid var(--c-border);
+        border-radius: 8px;
+        padding: 0 6px;
+        font-size: 12px;
+        font-family: inherit;
+        color: var(--c-text);
+        background: var(--c-bg);
+        outline: none;
+        cursor: pointer;
+    }
+ 
+    .nb-search-btn, .nb-add-btn {
+        height: 32px;
+        padding: 0 12px;
+        border: none;
+        border-radius: 8px;
+        font-size: 12px;
+        font-family: inherit;
+        cursor: pointer;
+        white-space: nowrap;
+        transition: opacity 0.2s;
+    }
+ 
+    .nb-search-btn {
+        background: var(--c-blue-light);
+        color: var(--c-text);
+    }
+ 
+    .nb-add-btn {
+        background: linear-gradient(135deg, var(--c-blue-mid), var(--c-pink));
+        color: white;
+        font-weight: 600;
+    }
+ 
+        .nb-search-btn:hover, .nb-add-btn:hover { opacity: 0.82; }
+ 
+    /* 条目列表 */
+    .nb-loading, .nb-empty {
+        text-align: center;
+        padding: 24px 0;
+        color: var(--c-text-soft);
+        font-size: 13px;
+    }
+ 
+    .nb-entries {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-bottom: 12px;
+    }
+ 
+    .nb-entry-card {
+        padding: 10px 12px;
+        border: 1.5px solid var(--c-border);
+        border-radius: 10px;
+        background: var(--c-bg);
+    }
+ 
+    .nb-entry-auto {
+        border-color: var(--c-blue-light);
+        background: linear-gradient(135deg, rgba(197,232,244,0.08), rgba(255,183,197,0.05));
+    }
+ 
+    .nb-entry-content {
+        font-size: 13px;
+        color: var(--c-text);
+        line-height: 1.55;
+        margin-bottom: 6px;
+    }
+ 
+    .nb-entry-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        margin-bottom: 6px;
+    }
+ 
+    .nb-tag {
+        padding: 2px 8px;
+        border-radius: 20px;
+        background: var(--c-pink-light);
+        color: var(--c-text-soft);
+        font-size: 11px;
+    }
+ 
+    .nb-entry-actions {
+        display: flex;
+        gap: 6px;
+        justify-content: flex-end;
+    }
+ 
+    .nb-edit-btn, .nb-del-btn {
+        padding: 3px 10px;
+        border: 1.5px solid var(--c-border);
+        border-radius: 6px;
+        font-size: 11px;
+        font-family: inherit;
+        cursor: pointer;
+        background: transparent;
+        color: var(--c-text-soft);
+        transition: background 0.15s, color 0.15s;
+    }
+ 
+        .nb-edit-btn:hover { background: var(--c-blue-light); color: var(--c-text); border-color: var(--c-blue); }
+        .nb-del-btn:hover  { background: #FFE0E0; color: #C06060; border-color: #FFAAAA; }
+ 
+    /* 分页 */
+    .nb-pagination {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        justify-content: center;
+        margin-top: 4px;
+        margin-bottom: 8px;
+        flex-wrap: wrap;
+    }
+ 
+    .nb-page-btn {
+        padding: 4px 10px;
+        border: 1.5px solid var(--c-border);
+        border-radius: 6px;
+        font-size: 12px;
+        font-family: inherit;
+        background: var(--c-surface);
+        color: var(--c-text-soft);
+        cursor: pointer;
+        transition: background 0.15s;
+    }
+ 
+        .nb-page-btn:hover:not(:disabled) { background: var(--c-pink-light); }
+        .nb-page-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+ 
+    .nb-page-info {
+        font-size: 12px;
+        color: var(--c-text-soft);
+        padding: 0 4px;
+    }
+ 
+    .nb-jump-input {
+        width: 44px;
+        height: 28px;
+        border: 1.5px solid var(--c-border);
+        border-radius: 6px;
+        padding: 0 6px;
+        font-size: 12px;
+        font-family: inherit;
+        color: var(--c-text);
+        background: var(--c-bg);
+        text-align: center;
+        outline: none;
+    }
+ 
+    /* 底部提示 */
+    .nb-file-hint {
+        font-size: 11px;
+        color: var(--c-text-soft);
+        text-align: center;
+        margin-top: 8px;
+    }
+ 
+    .nb-file-hint code {
+        background: var(--c-pink-light);
+        padding: 1px 5px;
+        border-radius: 4px;
+        font-size: 11px;
     }
 </style>

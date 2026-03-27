@@ -35,9 +35,12 @@
     const BUBBLE_H = computed(() => sizeConfig.value.bubbleH);
 
     // ── 情绪标签系统 ────────────────────────────────────────────────
-    const EMOTION_TAGS = ["happy", "sad", "angry", "shy", "surprised", "neutral"] as const;
+    const EMOTION_TAGS = ["happy", "sad", "angry", "shy", "surprised", "neutral", "sigh"] as const;
     type EmotionTag = typeof EMOTION_TAGS[number];
-    const EMOTION_REGEX = /\[(happy|sad|angry|shy|surprised|neutral)\]/gi;
+    // 精确匹配已知标签
+    const EMOTION_REGEX = /\[(happy|sad|angry|shy|surprised|neutral|sigh)\]/gi;
+    // 兜底正则：清除 LLM 可能造出的任何未知 [xxx] 标签
+    const UNKNOWN_TAG_REGEX = /\[[a-zA-Z]+\]/gi;
 
     /** 从 AI 回复中提取情绪标签，返回干净文本 + 情绪名称 */
     function parseEmotion(text: string): { cleanText: string; emotion: EmotionTag | null } {
@@ -45,7 +48,12 @@
         const emotion = match
             ? (match[0].slice(1, -1).toLowerCase() as EmotionTag)
             : null;
-        const cleanText = text.replace(EMOTION_REGEX, "").replace(/\s{2,}/g, " ").trim();
+        // 先剥离已知标签，再用兜底正则清除任何残留未知标签
+        const cleanText = text
+            .replace(EMOTION_REGEX, "")
+            .replace(UNKNOWN_TAG_REGEX, "")
+            .replace(/\s{2,}/g, " ")
+            .trim();
         return { cleanText, emotion };
     }
 
@@ -424,6 +432,10 @@
                 set("ParamEyeLOpen", 2.0);   // 眼睛尽量睁大（超过默认值）
                 set("ParamEyeROpen", 2.0);
                 break;
+            case "sigh":
+                // 暂无专属表情参数，后续 Live2D 表情匹配时补充
+                // 当前效果：归位到默认状态（已在 switch 前归位）
+                break;
             case "neutral":
             default:
                 break; // 已在上方归位
@@ -689,6 +701,11 @@
         await invoke("open_settings");
     }
 
+    // ── 聊天记录窗口 ─────────────────────────────────────────────────
+    async function openHistory() {
+        await invoke("open_history");
+    }
+
     // ── 动态窗口缩放 ────────────────────────────────────────────────
     async function resizeToFit() {
         const win = getCurrentWindow();
@@ -725,10 +742,20 @@
             if (savedLLM || savedChar) {
                 const llmCfg = savedLLM ? JSON.parse(savedLLM) : {};
                 const charCfg = savedChar ? JSON.parse(savedChar) : {};
+                const savedWindowIdx = parseInt(localStorage.getItem("rl-memory-window") ?? "1", 10);
+                const savedCharId = localStorage.getItem("rl-active-preset-id") ?? "";
+                let visionCfg: object | undefined;
+                try {
+                    const v = localStorage.getItem("rl-vision");
+                    visionCfg = v ? JSON.parse(v) : undefined;
+                } catch { visionCfg = undefined; }
                 ws!.send(JSON.stringify({
                     type: "configure",
                     llm: llmCfg,
                     character: charCfg,
+                    memory_window: isNaN(savedWindowIdx) ? 1 : savedWindowIdx,
+                    character_id: savedCharId,
+                    ...(visionCfg ? { vision: visionCfg } : {}),
                 }));
             }
         };
@@ -747,6 +774,15 @@
                 showBubbleWithText(cleanText);
                 // ② 语音播放（配置未启用时静默跳过）
                 speakText(cleanText);
+
+            } else if (data.type === "vision_proactive_speech") {
+                // 视觉感知主动发言（桌宠自己说话，非回复用户）
+                if (!isThinking.value) {
+                    const { cleanText, emotion } = parseEmotion(data.message);
+                    if (emotion) setEmotion(emotion);
+                    showBubbleWithText(cleanText);
+                    speakText(cleanText);
+                }
 
             } else if (data.type === "error") {
                 isThinking.value = false;
@@ -860,11 +896,17 @@
         });
 
         // 事件监听
-        unlisten.push(await listen("passthrough-changed", (e) => {
-            isLocked.value = e.payload as boolean;
-            if (isLocked.value) {
-                showControls.value = false;
-                inputOpen.value = false;
+        unlisten.push(await listen("config-changed", (e) => {
+            const payload = e.payload as { llm?: object; character?: object; memory_window?: number; character_id?: string; vision?: object };
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: "configure",
+                    llm: payload.llm ?? {},
+                    character: payload.character ?? {},
+                    memory_window: payload.memory_window ?? parseInt(localStorage.getItem("rl-memory-window") ?? "1", 10),
+                    character_id: payload.character_id ?? localStorage.getItem("rl-active-preset-id") ?? "",
+                    ...(payload.vision ? { vision: payload.vision } : {}),
+                }));
             }
         }));
         unlisten.push(await listen("mascot-hover", (e) => {
@@ -966,6 +1008,9 @@
                         </button>
                         <button class="ctrl-btn" @mousedown.stop @click.stop="openSettings" title="设置">
                             ⚙️
+                        </button>
+                        <button class="ctrl-btn" @mousedown.stop @click.stop="openHistory" title="聊天记录">
+                            📋
                         </button>
                         <button class="ctrl-btn" @mousedown.stop @click.stop title="音量">
                             🔊
@@ -1154,6 +1199,10 @@
 
     .controls-enter-active .ctrl-btn:nth-child(4) {
         animation: slideIn 0.2s 0.18s ease forwards;
+    }
+    
+    .controls-enter-active .ctrl-btn:nth-child(5) {
+        animation: slideIn 0.2s 0.24s ease forwards;
     }
 
     .controls-leave-active {

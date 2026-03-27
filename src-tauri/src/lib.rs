@@ -75,6 +75,30 @@ async fn open_settings(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+async fn open_history(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("history") {
+        win.show().map_err(|e| e.to_string())?;
+        win.set_focus().map_err(|e| e.to_string())?;
+    } else {
+        #[cfg(dev)]
+        let url = tauri::WebviewUrl::External(
+            "http://localhost:17420/history.html".parse().unwrap()
+        );
+        #[cfg(not(dev))]
+        let url = tauri::WebviewUrl::App("history.html".into());
+ 
+        tauri::WebviewWindowBuilder::new(&app, "history", url)
+            .title("Reverie Link · 聊天记录")
+            .inner_size(700.0, 560.0)
+            .resizable(true)
+            .center()
+            .build()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let is_passthrough = Arc::new(Mutex::new(false));
@@ -204,7 +228,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![set_cursor_passthrough, toggle_lock, open_settings])
+        .invoke_handler(tauri::generate_handler![set_cursor_passthrough, toggle_lock, open_settings, open_history])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
