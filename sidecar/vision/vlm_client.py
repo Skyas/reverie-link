@@ -361,7 +361,7 @@ def _parse_vlm_response(raw: str, incremental: bool = False, base: Optional[VLMR
 class VLMClient:
     """
     VLM 调用封装。
-    支持自动 fallback：专用 VLM → 主模型（若多模态）→ GLM-4V-Flash。
+    支持自动 fallback：专用 VLM → 主模型（若多模态）→ glm-4.6v-flash。
     """
 
     def __init__(self):
@@ -411,7 +411,7 @@ class VLMClient:
         分析截图。自动选择最合适的 VLM：
           ① 专用 VLM（有 API Key）
           ② 主模型（若支持多模态）
-          ③ GLM-4V-Flash（兜底，仍需 API Key）
+          ③ glm-4.6v-flash（兜底，仍需 API Key）
           ④ 不可用（返回 None）
         """
         from openai import AsyncOpenAI
