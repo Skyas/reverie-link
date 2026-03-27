@@ -271,7 +271,12 @@ def _extract_emotion(text: str) -> str:
     return ""
 
 
-# ── 视觉主动发言辅助函数 ──────────────────────────────────────
+# ── 视觉主动发言辅助函数 ──────────────────────────────
+ 
+# 全局的最近发言记录（防重复用）
+_recent_vision_speeches: list = []
+ 
+ 
 async def _drain_vision_speech(
     websocket: WebSocket,
     llm_client,
@@ -281,38 +286,66 @@ async def _drain_vision_speech(
     session_character_id: str,
     history,
     session_messages: list,
+    # ── 以下是新增参数 ──
+    window_index: int = 1,
+    character_name: str = "",
 ):
     """
     检查并处理视觉感知主动发言队列中的待发事件。
     每次最多处理 1 条，避免连续刷屏。
     """
+    global _recent_vision_speeches
+ 
     try:
         trigger = vision_speech_queue.get_nowait()
     except asyncio.QueueEmpty:
         return
-
-    # 用 session 相关的 trigger 检查（避免处理其他 session 的事件）
+ 
     if trigger.get("session_id") and trigger["session_id"] != session_id:
         return
-
+ 
     try:
-        messages = build_vision_speech_messages(system_prompt, trigger)
-        response = await llm_client.chat.completions.create(
-            model=llm_model, messages=messages, max_tokens=100, temperature=0.9,
+        # 改进：传入 recent_speeches 和 history
+        messages = build_vision_speech_messages(
+            system_prompt,
+            trigger,
+            recent_speeches=_recent_vision_speeches,
+            history=list(history),
+            window_index=window_index,
+            character_id=session_character_id,
+            character_name=character_name,
         )
+        try:
+            response = await llm_client.chat.completions.create(
+                model=llm_model, messages=messages,
+                max_completion_tokens=200, temperature=0.9,
+            )
+        except Exception:
+            response = await llm_client.chat.completions.create(
+                model=llm_model, messages=messages,
+                max_tokens=200, temperature=0.9,
+            )
         reply = response.choices[0].message.content.strip()
+        print(f"[Vision] LLM回复（finish_reason={response.choices[0].finish_reason}）: {reply[:50]}")
     except Exception as e:
         print(f"[Vision] 主动发言 LLM 调用失败: {e}")
         return
-
+ 
     emotion     = _extract_emotion(reply)
     clean_reply = re.sub(r'\[(happy|sad|angry|shy|surprised|neutral|sigh)\]', '', reply, flags=re.IGNORECASE)
     clean_reply = re.sub(r'\[[a-zA-Z_]+\]', '', clean_reply)
     clean_reply = clean_reply.strip()
-    if not clean_reply:
+ 
+    # 改进：允许"不说话"（回复 …… 或空）
+    if not clean_reply or clean_reply in ("……", "...", "。"):
         return
-
-    # 将主动发言写入时间线（作为 game_event 类型）
+ 
+    # 改进：记录最近发言，防重复
+    _recent_vision_speeches.append(clean_reply)
+    if len(_recent_vision_speeches) > 5:
+        _recent_vision_speeches.pop(0)
+ 
+    # 写入时间线
     scene_info = trigger.get("scene_info", {})
     game_event_msg = TimelineMessage.create(
         msg_type=MessageType.GAME_EVENT,
@@ -330,10 +363,10 @@ async def _drain_vision_speech(
     )
     save_message(game_event_msg)
     session_messages.append(game_event_msg)
-
+ 
     await websocket.send_text(json.dumps({
         "type":    "vision_proactive_speech",
-        "message": reply,  # 含情绪标签，由前端统一处理
+        "message": reply,
     }, ensure_ascii=False))
 
 
@@ -388,6 +421,8 @@ async def websocket_chat(websocket: WebSocket):
                     session_character_id=session_character_id,
                     history=history,
                     session_messages=session_messages,
+                    window_index=session_window_index,
+                    character_name=current_character.get("name", ""),
                 )
                 continue
 
@@ -518,7 +553,7 @@ async def websocket_chat(websocket: WebSocket):
                     del session_messages[:evicted_count]
 
             try:
-                response = await llm_client.chat.completions.create(model=LLM_MODEL, messages=messages, max_tokens=150, temperature=0.85)
+                response = await llm_client.chat.completions.create(model=LLM_MODEL, messages=messages, max_tokens=300, temperature=0.85)
                 reply = response.choices[0].message.content.strip()
             except Exception as e:
                 err_str = str(e)
@@ -555,7 +590,7 @@ async def websocket_chat(websocket: WebSocket):
                     try:
                         response2 = await llm_client.chat.completions.create(
                             model=LLM_MODEL, messages=messages_with_screen,
-                            max_tokens=150, temperature=0.85,
+                            max_tokens=300, temperature=0.85,
                         )
                         reply = response2.choices[0].message.content.strip()
                     except Exception:
