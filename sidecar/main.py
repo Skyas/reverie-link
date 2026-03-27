@@ -95,6 +95,11 @@ async def list_live2d_models():
         except Exception as e:
             print(f"[AutoFix] {folder.name} 修复失败（跳过）: {e}")
 
+        try:
+            _optimize_idle_fade(folder, model_file)
+        except Exception as e:
+            print(f"[AutoFix] {folder.name} idle 优化失败（跳过）: {e}")
+
         display_name = folder.name.replace("_", " ").replace("-", " ")
         models.append({
             "folder":       folder.name,
@@ -171,6 +176,70 @@ def _auto_fix_motions(folder: Path, model_file: Path) -> None:
         _json.dump(data, f, ensure_ascii=False, indent="	")
 
     print(f"[AutoFix] {folder.name}: 自动注入 Motions（idle={idle_file.name}，共 {len(motion_files)} 个动作）")
+
+
+def _optimize_idle_fade(folder: Path, model_file: Path) -> None:
+    """
+    检测 idle 动作是否为「帧切换型」（线稿逐帧抖动等），自动优化 model3.json。
+
+    判定规则：idle 动作数 > 1 且所有 idle motion 的 Duration 均 < 2 秒。
+    此类动作依赖 stepped 插值做 0/1 跳变来切换绘画帧，
+    pixi-live2d-display 的 crossfade 会将跳变值线性混合，
+    导致多帧叠加显示（视觉上表现为闪烁）。
+
+    修复策略：只保留第一个 idle，FadeInTime/FadeOutTime 设为 0。
+    单个 Loop=true 的短动作自身就包含完整的帧切换周期，
+    无需多动作轮换，消除 crossfade 即消除闪烁。
+
+    对以下情况完全不做任何修改：
+    - 只有 0~1 个 idle 的模型（无 crossfade 问题）
+    - 存在任一 Duration >= 2s 的 idle（正常模型）
+    - motion 文件缺失或解析失败（不冒险修改）
+    """
+    import json as _json
+
+    with open(model_file, "r", encoding="utf-8") as f:
+        data = _json.load(f)
+
+    file_refs = data.get("FileReferences", {})
+    motions = file_refs.get("Motions", {})
+    idle_list = motions.get("Idle", [])
+
+    if len(idle_list) <= 1:
+        return  # 只有 0~1 个 idle，无 crossfade 问题
+
+    # ── 逐个读取 idle motion 文件，检查 Duration ──────────────
+    DURATION_THRESHOLD = 2.0  # 秒：低于此值判定为帧切换型
+
+    for motion_entry in idle_list:
+        motion_rel = motion_entry.get("File", "")
+        if not motion_rel:
+            return  # 配置异常，不冒险修改
+        motion_path = folder / motion_rel
+        if not motion_path.exists():
+            return  # 文件缺失，跳过
+        try:
+            with open(motion_path, "r", encoding="utf-8") as f:
+                motion_data = _json.load(f)
+            duration = motion_data.get("Meta", {}).get("Duration", 999)
+            if duration >= DURATION_THRESHOLD:
+                return  # 存在长 idle，属于正常模型，不修改
+        except Exception:
+            return  # 解析失败，不冒险修改
+
+    # ── 全部 idle 均为短周期 → 帧切换型，执行优化 ────────────
+    first_idle = idle_list[0].copy()
+    first_idle["FadeInTime"] = 0
+    first_idle["FadeOutTime"] = 0
+    motions["Idle"] = [first_idle]
+    file_refs["Motions"] = motions
+    data["FileReferences"] = file_refs
+
+    with open(model_file, "w", encoding="utf-8") as f:
+        _json.dump(data, f, ensure_ascii=False, indent="\t")
+
+    print(f"[AutoFix] {folder.name}: 检测到帧切换型 idle（全部 Duration < {DURATION_THRESHOLD}s），"
+          f"已精简为 1 个动作并禁用 crossfade")
 
 
 # ── ElevenLabs TTS 接口 ───────────────────────────────────────
