@@ -49,3 +49,5 @@ sidecar/__pycache__/
 
 public/rvc/*
 !public/rvc/这里放本地RVC V2模型.txt
+
+data/
