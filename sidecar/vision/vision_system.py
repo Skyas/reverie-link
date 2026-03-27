@@ -60,7 +60,7 @@ class VisionSystem:
         self.vlm_client.configure_vlm(
             base_url=cfg.get("vlm_base_url", ""),
             api_key=cfg.get("vlm_api_key", ""),
-            model=cfg.get("vlm_model", "glm-4v-flash"),
+            model=cfg.get("vlm_model", "glm-4.6v-flash"),
         )
         self.speech_engine.set_talk_level(int(cfg.get("talk_level", 1)))
         self.speech_engine.set_cooldown(float(cfg.get("cooldown_seconds", 20)))
