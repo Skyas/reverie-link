@@ -1,11 +1,10 @@
 """
-视觉感知 · 事件缓冲池
+视觉感知 · 事件缓冲池（改进版，直接替换原 event_buffer.py）
 
-负责：
-  - 存储每帧分析产生的视觉事件
-  - 累积兴趣分
-  - 管理事件生命周期（consumed / unconsumed）
-  - 为发言生成提供上下文摘要
+改进点：
+  1. 新增 add_score() 方法：只累加兴趣分，不创建事件。
+     用于 pixel_skip / static_frame 等无 VLM 分析的帧，
+     避免产生大量空描述事件污染聊天 AI 的上下文。
 """
 import random
 import time
@@ -58,21 +57,51 @@ class EventBuffer:
     def accumulated_score(self) -> int:
         return self._accumulated_score
 
+    # ── 改进：只加分不加事件 ─────────────────────────────────────
+
+    def add_score(self, score: int):
+        """
+        只累加兴趣分，不创建事件。
+
+        用于 pixel_skip / static_frame 等无 VLM 分析的帧。
+        这些帧没有 scene_description，如果也 push 进事件列表，
+        会产生大量 "[14:02:30] 无描述（兴趣分 +1）" 的垃圾条目，
+        污染 build_context_prompt() 输出给聊天 AI 的上下文。
+
+        只加分可以正常推进发言触发（兴趣分累积），
+        同时保持上下文干净（只包含有实际描述的 VLM 事件）。
+        """
+        self._accumulated_score += score
+
+    # ── 以下与原版完全一致 ───────────────────────────────────────
+
     def push(
-        self,
-        interest_score: int,
-        scene_type: str,
-        scene_description: str,
-        game_name: Optional[str],
-        confidence: str,
-        source: str = "vlm_background",
-    ) -> VisionEvent:
+    self,
+    interest_score: int,
+    scene_type: str,
+    scene_description: str,
+    game_name: Optional[str],
+    confidence: str,
+    source: str = "vlm_background",
+    ) -> Optional[VisionEvent]:       # ← 返回类型从 VisionEvent 改为 Optional
         """
         添加一条新事件，并累积兴趣分。
-        工作场景（work）特殊处理：不记录具体内容，只记录事实。
+        改进：如果描述和上一条高度相似，只加分不加事件，防止重复上下文污染 LLM。
         """
         if scene_type == "work":
-            scene_description = "用户正在工作"  # 隐私保护，不记录工作内容
+            scene_description = "用户正在工作"
+
+        # ── 去重：和最近一条有描述的事件比较 ─────────────────────
+        if scene_description and self._events:
+            last_with_desc = None
+            for e in reversed(self._events):
+                if e.scene_description:
+                    last_with_desc = e
+                    break
+            if last_with_desc and self._is_similar(scene_description, last_with_desc.scene_description):
+                # 描述太像，只加分不加事件
+                self._accumulated_score += interest_score
+                return None
 
         evt = VisionEvent(
             id=_gen_event_id(),
@@ -83,11 +112,36 @@ class EventBuffer:
             game_name=game_name,
             confidence=confidence,
             consumed=False,
-            source=source,
+           source=source,
         )
         self._events.append(evt)
         self._accumulated_score += interest_score
         return evt
+
+    @staticmethod
+    def _is_similar(a: str, b: str) -> bool:
+        """
+        简单的字符串相似度判断。
+        不用复杂的算法——VLM 重复时描述几乎一模一样，
+        只要检查共同字符比例就够了。
+        """
+        if not a or not b:
+            return False
+        # 短文本直接比较
+        if a == b:
+            return True
+        # 用字符集合的 Jaccard 相似度
+        # 把描述拆成2-gram（连续两个字）比较
+        def bigrams(s):
+            return set(s[i:i+2] for i in range(len(s) - 1))
+        bg_a = bigrams(a)
+        bg_b = bigrams(b)
+        if not bg_a or not bg_b:
+            return a == b
+        intersection = len(bg_a & bg_b)
+        union = len(bg_a | bg_b)
+        similarity = intersection / union
+        return similarity > 0.7    # 70% 以上相似就认为是重复
 
     def get_unconsumed(self) -> list[VisionEvent]:
         """获取所有未消费事件"""
