@@ -207,7 +207,7 @@
     const visionEnabled      = ref<boolean>(!!_vc.enabled);
     const visionVlmBaseUrl   = ref<string>(_vc.vlm_base_url   ?? "https://open.bigmodel.cn/api/paas/v4/");
     const visionVlmApiKey    = ref<string>(_vc.vlm_api_key    ?? "");
-    const visionVlmModel     = ref<string>(_vc.vlm_model      ?? "glm-4v-flash");
+    const visionVlmModel     = ref<string>(_vc.vlm_model      ?? "glm-4.6v-flash");
     const visionTalkLevel    = ref<number>(_vc.talk_level      ?? 1);
     const visionCooldown     = ref<number>(_vc.cooldown_seconds ?? 20);
     const visionManualGameMode = ref<boolean>(!!_vc.manual_game_mode);
@@ -217,7 +217,7 @@
             enabled:          visionEnabled.value,
             vlm_base_url:     visionVlmBaseUrl.value.trim(),
             vlm_api_key:      visionVlmApiKey.value.trim(),
-            vlm_model:        visionVlmModel.value.trim() || "glm-4v-flash",
+            vlm_model:        visionVlmModel.value.trim() || "glm-4.6v-flash",
             talk_level:       visionTalkLevel.value,
             cooldown_seconds: visionCooldown.value,
             manual_game_mode: visionManualGameMode.value,
@@ -1135,12 +1135,12 @@
                         <div class="field-group" style="margin-bottom:8px;">
                             <label class="field-label">VLM API Key</label>
                             <input class="field-input" type="password" v-model="visionVlmApiKey"
-                                   placeholder="填写 VLM API Key（如 GLM-4V-Flash）" />
+                                   placeholder="填写 VLM API Key（如 glm-4.6v-flash）" />
                         </div>
                         <div class="field-group" style="margin-bottom:12px;">
                             <label class="field-label">VLM 模型名称</label>
                             <input class="field-input" v-model="visionVlmModel"
-                                   placeholder="glm-4v-flash" />
+                                   placeholder="glm-4.6v-flash" />
                         </div>
 
                         <!-- VLM 不可用提示 -->
