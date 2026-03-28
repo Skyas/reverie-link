@@ -3,5 +3,15 @@ uvicorn[standard]
 openai
 python-dotenv
 httpx
-edge-tts
-rvc-python
+chromadb
+# --- Phase 3: 视觉感知 ---
+Pillow
+psutil
+# --- 下面是 Bert-VITS2 运行必备的基础库 ---
+torch
+torchaudio
+transformers
+librosa
+jieba
+cn2an
+pypinyin
