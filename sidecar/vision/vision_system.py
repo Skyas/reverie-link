@@ -251,17 +251,31 @@ class VisionSystem:
             print("[Vision] 🔄 检测到场景内切换，下一帧将完整重识别")
             self.scene_manager.on_manual_reset()
 
-        # ─ 9. 游戏检测 ─────────────────────────────────────────
+        # ─ 9. 游戏检测（保守策略：VLM 优先）────────────────
         detect = self.game_detector.detect(
             process_info=process_info,
             vlm_scene_type=vlm_result.scene_type,
             vlm_game_name=vlm_result.game_name,
         )
         if detect["is_game"]:
-            if vlm_result.scene_type != "game" and vlm_result.confidence != "high":
+            if vlm_result.scene_type == "game":
+                # VLM 和 game_detector 一致 → 补全游戏名
+                if detect["game_name"] and not vlm_result.game_name:
+                    vlm_result.game_name = detect["game_name"]
+            elif vlm_result.confidence == "low":
+                # VLM 不确定 → 允许 game_detector 覆盖
                 vlm_result.scene_type = "game"
-            if detect["game_name"] and not vlm_result.game_name:
-                vlm_result.game_name = detect["game_name"]
+                if detect["game_name"] and not vlm_result.game_name:
+                    vlm_result.game_name = detect["game_name"]
+                print(f"[Vision] 🎮 game_detector 覆盖VLM（来源={detect['source']}，VLM置信=low）")
+            else:
+                # VLM 明确说不是游戏（medium/high）→ 信任 VLM
+                print(f"[Vision] ℹ️ game_detector={detect['source']}认为是游戏，但VLM置信={vlm_result.confidence}判定为{vlm_result.scene_type}，以VLM为准")
+
+        # 场景不是 game 时，清除残留的游戏字段
+        if vlm_result.scene_type != "game":
+            vlm_result.game_name = None
+            vlm_result.game_genre = None
 
         # ─ 10. 更新场景管理器 ──────────────────────────────────
         self.scene_manager.update(vlm_result, window_title)
@@ -457,6 +471,36 @@ class VisionSystem:
         }
 
     # ── 用户主动截屏 ─────────────────────────────────────────────
+
+    @property
+    def is_main_multimodal(self) -> bool:
+        """主模型是否支持多模态（用于决定截屏走直传还是走VLM中转）"""
+        return self.vlm_client._main_is_multimodal()
+
+    async def capture_screenshot_only(self) -> Optional[dict]:
+        """
+        仅截屏+压缩，不调 VLM。
+        用于多模态主模型场景：图片直接嵌入 LLM 消息，跳过 VLM 中间步骤。
+        返回 {"img_b64": str, "window_title": str} 或 {"error": str} 或 None。
+        """
+        import base64
+
+        screenshot = await asyncio.to_thread(capture_screen)
+        if screenshot is None:
+            return None
+
+        if await asyncio.to_thread(is_blank_screen, screenshot):
+            return {"error": "截屏失败（可能被反作弊系统拦截）"}
+
+        process_info = await asyncio.to_thread(get_foreground_process_info)
+        window_title = process_info.get("window_title", "")
+        compressed   = await asyncio.to_thread(compress_for_vlm, screenshot)
+        img_b64      = base64.b64encode(compressed).decode()
+
+        return {
+            "img_b64":      img_b64,
+            "window_title": window_title,
+        }
 
     async def capture_for_user(self) -> Optional[dict]:
         screenshot = await asyncio.to_thread(capture_screen)

@@ -343,11 +343,18 @@ def _parse_vlm_response(raw: str, incremental: bool = False, base: Optional[VLMR
     )
 
     if incremental and base:
-        # 增量模式：只更新动态字段，其余沿用上次
-        result.app_name   = base.app_name
-        result.scene_type = base.scene_type
-        result.game_name  = base.game_name
-        result.game_genre = base.game_genre
+        if result.scene_changed:
+            # 场景质变：不继承旧状态，使用 VLM 本帧的判断
+            result.app_name   = data.get("app_name") or base.app_name
+            result.scene_type = data.get("scene_type") or base.scene_type
+            result.game_name  = data.get("game_name") or None   # 不兜底继承
+            result.game_genre = data.get("game_genre") or None
+        else:
+            # 普通增量：沿用上次的基础信息
+            result.app_name   = base.app_name
+            result.scene_type = base.scene_type
+            result.game_name  = base.game_name
+            result.game_genre = base.game_genre
     else:
         result.app_name   = data.get("app_name") or None
         result.scene_type = data.get("scene_type", "unknown")
