@@ -33,6 +33,7 @@ from prompt_builder import (
     build_system_prompt,
     build_vision_speech_messages,
     build_screenshot_messages,
+    build_multimodal_screenshot_messages,
 )
 
 from memory import (
@@ -575,9 +576,15 @@ async def websocket_chat(websocket: WebSocket):
             # Phase 3: 关键词快筛 — 用户是否请求观察屏幕
             user_wants_screenshot = bool(_SCREENSHOT_KEYWORDS.search(user_msg))
             screenshot_info: Optional[dict] = None
+            multimodal_screenshot: Optional[dict] = None
 
             if user_wants_screenshot and vision_system:
-                screenshot_info = await vision_system.capture_for_user()
+                if vision_system.is_main_multimodal:
+                    # 多模态主模型：直接截图，跳过 VLM 中转
+                    multimodal_screenshot = await vision_system.capture_screenshot_only()
+                else:
+                    # 非多模态：走 VLM 分析中转
+                    screenshot_info = await vision_system.capture_for_user()
 
             # 步骤⑥：检索相关摘要，注入 Layer 2
             relevant = retrieve_relevant_summaries(
@@ -585,8 +592,21 @@ async def websocket_chat(websocket: WebSocket):
                 character_id=session_character_id,
             )
 
-            if screenshot_info and not screenshot_info.get("error"):
-                # 直接用截图结果组装 messages
+            if multimodal_screenshot and not multimodal_screenshot.get("error"):
+                # 多模态路径：图片直接嵌入 LLM 消息
+                messages = build_multimodal_screenshot_messages(
+                    system_prompt,
+                    list(history),
+                    user_msg,
+                    img_b64=multimodal_screenshot["img_b64"],
+                    window_title=multimodal_screenshot.get("window_title", ""),
+                    window_index=session_window_index,
+                    character_id=session_character_id,
+                    character_name=current_character.get("name", ""),
+                    relevant_summaries=relevant,
+                )
+            elif screenshot_info and not screenshot_info.get("error"):
+                # 非多模态路径：VLM 结构化结果
                 messages = build_screenshot_messages(
                     system_prompt,
                     list(history),
@@ -644,28 +664,46 @@ async def websocket_chat(websocket: WebSocket):
                 continue
 
             # Phase 3: 检测 [NEED_SCREENSHOT] 标签（LLM 意图兜底检测）
-            if reply.startswith("[NEED_SCREENSHOT]") and vision_system and not screenshot_info:
-                screenshot_info = await vision_system.capture_for_user()
-                if screenshot_info and not screenshot_info.get("error"):
-                    # 用截图结果重新生成回复
-                    messages_with_screen = build_screenshot_messages(
-                        system_prompt,
-                        list(history),
-                        user_msg,
-                        screenshot_info=screenshot_info,
-                        window_index=session_window_index,
-                        character_id=session_character_id,
-                        character_name=current_character.get("name", ""),
-                        relevant_summaries=relevant,
-                    )
-                    try:
-                        response2 = await llm_client.chat.completions.create(
-                            model=LLM_MODEL, messages=messages_with_screen,
-                            max_tokens=300, temperature=0.85,
+            if reply.startswith("[NEED_SCREENSHOT]") and vision_system and not screenshot_info and not multimodal_screenshot:
+                if vision_system.is_main_multimodal:
+                    fallback_shot = await vision_system.capture_screenshot_only()
+                    if fallback_shot and not fallback_shot.get("error"):
+                        messages_with_screen = build_multimodal_screenshot_messages(
+                            system_prompt, list(history), user_msg,
+                            img_b64=fallback_shot["img_b64"],
+                            window_title=fallback_shot.get("window_title", ""),
+                            window_index=session_window_index,
+                            character_id=session_character_id,
+                            character_name=current_character.get("name", ""),
+                            relevant_summaries=relevant,
                         )
-                        reply = response2.choices[0].message.content.strip()
-                    except Exception:
-                        pass  # 保留原 reply
+                        try:
+                            response2 = await llm_client.chat.completions.create(
+                                model=LLM_MODEL, messages=messages_with_screen,
+                                max_tokens=300, temperature=0.85,
+                            )
+                            reply = response2.choices[0].message.content.strip()
+                        except Exception:
+                            pass
+                else:
+                    screenshot_info = await vision_system.capture_for_user()
+                    if screenshot_info and not screenshot_info.get("error"):
+                        messages_with_screen = build_screenshot_messages(
+                            system_prompt, list(history), user_msg,
+                            screenshot_info=screenshot_info,
+                            window_index=session_window_index,
+                            character_id=session_character_id,
+                            character_name=current_character.get("name", ""),
+                            relevant_summaries=relevant,
+                        )
+                        try:
+                            response2 = await llm_client.chat.completions.create(
+                                model=LLM_MODEL, messages=messages_with_screen,
+                                max_tokens=300, temperature=0.85,
+                            )
+                            reply = response2.choices[0].message.content.strip()
+                        except Exception:
+                            pass
 
             emotion     = _extract_emotion(reply)
             # 先剥离已知标签，再用兜底正则清除任何残留的 [xxx] 格式未知标签
@@ -686,14 +724,14 @@ async def websocket_chat(websocket: WebSocket):
 
             now_ts = time.time()
             history.append({"role": "user",     "content": user_msg, "timestamp": now_ts})
-            history.append({"role": "assistant", "content": reply,    "timestamp": now_ts})
+            history.append({"role": "assistant", "content": clean_reply, "timestamp": now_ts})
  
             # 步骤⑤：记录完整消息供提取器使用，并判断是否触发提取
             session_messages.append(user_timeline_msg)
             session_messages.append(ai_timeline_msg)
             extractor.on_round_complete(session_messages)
  
-            await websocket.send_text(json.dumps({"type": "chat_response", "message": reply}, ensure_ascii=False))
+            await websocket.send_text(json.dumps({"type": "chat_response", "message": clean_reply}, ensure_ascii=False))
 
             # Phase 3: 用户消息处理完成，恢复视觉感知的主动发言权
             if vision_system:

@@ -266,6 +266,60 @@ def build_screenshot_messages(
     return messages
 
 
+def build_multimodal_screenshot_messages(
+    system_prompt: str,
+    history: list[dict],
+    user_message: str,
+    img_b64: str,
+    window_title: str = "",
+    window_index: int = DEFAULT_WINDOW_INDEX,
+    character_id: str = "",
+    character_name: str = "",
+    relevant_summaries: Optional[list[str]] = None,
+) -> list[dict]:
+    """
+    多模态截屏消息：图片直接嵌入 LLM 消息，跳过 VLM 中转。
+    仅在主模型支持多模态时使用，省去一次 VLM 调用。
+    """
+    trimmed = trim_history(history, window_index)
+    clean_history = [
+        {"role": msg["role"], "content": msg["content"]}
+        for msg in trimmed
+    ]
+
+    memory_layer = _build_memory_layer(
+        character_id=character_id,
+        character_name=character_name,
+        relevant_summaries=relevant_summaries or [],
+    )
+
+    time_note = _build_time_note()
+
+    full_system = system_prompt + "\n\n" + time_note
+    if memory_layer:
+        full_system += "\n\n" + memory_layer
+
+    # 简洁的观察指令，让模型直接看图
+    observe_hint = ""
+    if window_title:
+        observe_hint = f"（当前窗口：{window_title}）"
+
+    text_content = f"{user_message}\n\n请观察这张屏幕截图{observe_hint}，结合画面内容回复。"
+
+    img_url = f"data:image/jpeg;base64,{img_b64}"
+
+    messages = [{"role": "system", "content": full_system}]
+    messages.extend(clean_history)
+    messages.append({
+        "role": "user",
+        "content": [
+            {"type": "text",      "text": text_content},
+            {"type": "image_url", "image_url": {"url": img_url}},
+        ],
+    })
+    return messages
+
+
 def _build_memory_layer(
     character_id: str,
     character_name: str,

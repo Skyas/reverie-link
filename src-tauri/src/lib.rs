@@ -165,6 +165,25 @@ pub fn run() {
                 })
                 .build(app)?;
 
+            // ── 桌宠窗口截屏排除（WDA_EXCLUDEFROMCAPTURE）────
+            #[cfg(target_os = "windows")]
+            {
+                if let Some(window) = app.get_webview_window("main") {
+                    if let Ok(hwnd) = window.hwnd() {
+                        use windows_sys::Win32::UI::WindowsAndMessaging::SetWindowDisplayAffinity;
+                        const WDA_EXCLUDEFROMCAPTURE: u32 = 0x00000011;
+                        let result = unsafe {
+                            SetWindowDisplayAffinity(hwnd.0, WDA_EXCLUDEFROMCAPTURE)
+                        };
+                        if result != 0 {
+                            println!("[Tauri] ✅ 桌宠窗口已设置为截屏排除");
+                        } else {
+                            eprintln!("[Tauri] ⚠️ SetWindowDisplayAffinity 失败，桌宠可能仍会出现在截图中");
+                        }
+                    }
+                }
+            }
+
             // ── 鼠标轮询线程 ──────────────────────────────────
             let app_handle = app.handle().clone();
             let is_passthrough_clone = is_passthrough.clone();
