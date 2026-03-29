@@ -288,7 +288,7 @@ class VisionSystem:
             f" 累计={self.event_buffer.accumulated_score}/{threshold}"
             f" 活动={activity.state.value}"
             f" VLM次数={stats['total_vlm_calls']}"
-            f"\n         描述: {vlm_result.scene_description[:80]}"
+            f"\n         描述: {vlm_result.scene_description}"
         )
 
         # ─ 12. 发言决策 ────────────────────────────────────────

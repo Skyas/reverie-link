@@ -86,17 +86,17 @@ MOBA、回合制策略、动作冒险、格斗、音乐节奏、塔防、\
     unknown = 无法判断
 
 - scene_description：**必须是一个纯字符串**（不是对象，不是数组）。
-  用2~3句话描述当前画面：
+  用1~2句**简短的**话描述当前画面（控制在50字以内）：
   · 画面里正在发生什么
   · 如果用户不在操作（死亡/观战/过场），要说明这一点
   · 可见的关键UI信息（血量/分数/倒计时/技能冷却等）
-  非游戏场景用1句话描述即可
+  非游戏场景用1句话描述即可，不要罗列窗口名称
 
-- scene_facts：一个字符串数组，列出画面中值得关注的关键事实。
+- scene_facts：一个字符串数组，列出画面中值得关注的关键事实（最多3条，每条10字以内）。
   示例：
-    游戏中：["角色血量约30%", "正在与boss战斗", "队友已倒地"]
-    死亡中：["用户角色已死亡", "复活倒计时18秒", "正在观看队友团战"]
-    菜单中：["在装备商店", "金币2300"]
+    游戏中：["血量约30%", "boss战", "队友倒地"]
+    死亡中：["角色已死亡", "复活倒计时18秒"]
+    菜单中：["装备商店", "金币2300"]
   非游戏场景可以为空数组 []
 
 重要规则：
@@ -105,6 +105,7 @@ MOBA、回合制策略、动作冒险、格斗、音乐节奏、塔防、\
 3. scene_description 必须是纯字符串，不要返回嵌套的 JSON 对象或数组。
 4. 不要假设画面中的操作主体就是用户。如果画面显示的是死亡画面、回放、观战，请在 player_state 和 scene_description 中如实说明。
 5. 截图中可能会出现一个桌面宠物（Live2D 角色，通常在屏幕边缘），这不是游戏或应用的一部分，请完全忽略它，不要在描述中提及。
+6. 保持 JSON 紧凑，所有文本字段尽量简短。整个 JSON 应控制在 300 字以内。
 
 只返回 JSON，不要任何其他文字。"""
 
@@ -123,8 +124,8 @@ _USER_TRIGGERED_PROMPT = """\
 - confidence：你对判断的置信度：high / medium / low
 - interest_score：画面的兴趣程度（1~15 的整数）
 - player_state：playing / spectating / in_menu / cutscene / waiting / unknown
-- scene_description：**纯字符串**，用 2~3 句话详细描述当前画面内容
-- scene_facts：字符串数组，列出画面中的关键事实
+- scene_description：**纯字符串**，用1~2句简短的话描述当前画面内容（控制在50字以内）
+- scene_facts：字符串数组，列出画面中的关键事实（最多3条，每条10字以内）
 
 重要：请忽略截图中的敏感信息。scene_description 必须是纯字符串。\
 如果无法确定场景类型，scene_type 填 "unknown"，confidence 填 "low"。
@@ -152,8 +153,8 @@ _INCREMENTAL_PROMPT = """\
   注意：持续的战斗画面如果和上一帧差不多，应该评 1-3 分，
   不要因为"画面里有战斗"就一直给高分。只有新发生的事件才应该高分。
 - player_state：playing / spectating / in_menu / cutscene / waiting / unknown
-- scene_description：**纯字符串**，2~3句描述当前画面
-- scene_facts：字符串数组，列出关键事实
+- scene_description：**纯字符串**，1~2句简短描述当前画面（50字以内）
+- scene_facts：字符串数组，列出关键事实（最多3条，每条10字以内）
 - scene_changed：布尔值。以下情况返回 true：
     · 从菜单进入游戏（或反过来）
     · 从存活变为死亡（或反过来）
@@ -361,7 +362,7 @@ def _parse_vlm_response(raw: str, incremental: bool = False, base: Optional[VLMR
 class VLMClient:
     """
     VLM 调用封装。
-    支持自动 fallback：专用 VLM → 主模型（若多模态）→ glm-4.6v-flash。
+    优先级：主模型（多模态）→ 独立配置 VLM → 不可用。
     """
 
     def __init__(self):
@@ -382,8 +383,8 @@ class VLMClient:
         self._main_model  = model
 
     def is_available(self) -> bool:
-        """检查 VLM 是否可用（有 API Key）"""
-        return bool(self._vlm_api_key)
+        """检查 VLM 是否可用（主模型多模态 或 有独立 VLM API Key）"""
+        return (self._main_client is not None and self._main_is_multimodal()) or bool(self._vlm_api_key)
 
     def _get_multimodal_models(self) -> set:
         """已知支持多模态（Vision）的主模型名称关键词"""
@@ -409,10 +410,9 @@ class VLMClient:
     ) -> Optional[VLMResult]:
         """
         分析截图。自动选择最合适的 VLM：
-          ① 专用 VLM（有 API Key）
-          ② 主模型（若支持多模态）
-          ③ glm-4.6v-flash（兜底，仍需 API Key）
-          ④ 不可用（返回 None）
+          ① 主模型（若支持多模态）→ 无条件最高优先
+          ② 独立配置的 VLM（有 API Key）
+          ③ 不可用（返回 None）
         """
         from openai import AsyncOpenAI
 
@@ -455,7 +455,12 @@ class VLMClient:
             return None
 
     def _select_client(self):
-        """按优先级选择 VLM 客户端"""
+        """
+        按优先级选择 VLM 客户端：
+          ① 主模型支持多模态 → 无条件使用主模型（最高优先）
+          ② 用户单独配置了 VLM（有 API Key）→ 使用配置的 VLM
+          ③ 都没有 → 不可用
+        """
         from openai import AsyncOpenAI
 
         print(f"[VLM选择] vlm_model={self._vlm_model}, vlm_base_url={self._vlm_base_url[:30]}...")
@@ -463,23 +468,17 @@ class VLMClient:
         print(f"[VLM选择] main_model={self._main_model}, main_client={'有' if self._main_client else '无'}")
         print(f"[VLM选择] main_is_multimodal={self._main_is_multimodal()}")
 
-        _is_default_vlm = (
-            self._vlm_model == DEFAULT_VLM_MODEL
-            and self._vlm_base_url == DEFAULT_VLM_BASE_URL
-        )
-
-        # 情况1：用户单独配置了非默认 VLM → 优先用它
-        if self._vlm_api_key and not _is_default_vlm:
-           client = AsyncOpenAI(api_key=self._vlm_api_key, base_url=self._vlm_base_url)
-           return client, self._vlm_model
-
-        # 情况2：主模型支持多模态 → 用主模型（免去额外 VLM 开销）
+        # 优先级①：主模型支持多模态 → 无条件使用主模型
         if self._main_client and self._main_is_multimodal():
+            print(f"[VLM选择] → 使用主模型 {self._main_model}（多模态）")
             return self._main_client, self._main_model
 
-        # 情况3：兜底用默认 VLM（需要有 Key）
+        # 优先级②：用户配置了独立 VLM（有 API Key）
         if self._vlm_api_key:
-           client = AsyncOpenAI(api_key=self._vlm_api_key, base_url=self._vlm_base_url)
-           return client, self._vlm_model
+            print(f"[VLM选择] → 使用独立VLM {self._vlm_model}")
+            client = AsyncOpenAI(api_key=self._vlm_api_key, base_url=self._vlm_base_url)
+            return client, self._vlm_model
 
+        # 无可用视觉模型
+        print("[VLM选择] → 无可用视觉模型")
         return None, None
