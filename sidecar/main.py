@@ -402,6 +402,7 @@ async def _drain_vision_speech(
         return
  
     emotion     = _extract_emotion(reply)
+    print(f"[debug] re module = {re}")
     clean_reply = re.sub(r'\[(happy|sad|angry|shy|surprised|neutral|sigh)\]', '', reply, flags=re.IGNORECASE)
     clean_reply = re.sub(r'\[[a-zA-Z_]+\]', '', clean_reply)
     clean_reply = clean_reply.strip()

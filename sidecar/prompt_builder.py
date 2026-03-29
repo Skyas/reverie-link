@@ -14,6 +14,7 @@ Prompt 组装模块（改进版，直接替换原 prompt_builder.py）
 """
 
 import random
+import re
 import time
 import sys
 import os
@@ -386,8 +387,6 @@ def build_vision_speech_messages(
     time_note = _build_time_note()
 
     full_system = system_prompt + "\n\n" + time_note
-    if memory_layer:
-        full_system += "\n\n" + memory_layer
 
     # 主动发言时移除 [NEED_SCREENSHOT] 相关指令（已经在看屏幕了）
     full_system = re.sub(
