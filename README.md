@@ -134,16 +134,20 @@ public/rvc/
 
 ```
 📦 reverie-link/
- ┣ 📂 sidecar/              # Python 后端：LLM、TTS、RVC、游戏接口
+ ┣ 📂 sidecar/              # Python 后端：LLM、TTS、RVC、记忆与视觉引擎
+ ┃ ┣ 📂 memory/             # 三阶混合记忆架构（SQLite + ChromaDB + 核心提取）
+ ┃ ┣ 📂 vision/             # 视觉感知系统（截屏预筛 + VLM 解析 + 决策引擎）
  ┃ ┣ 📜 main.py             # FastAPI + WebSocket 主入口
- ┃ ┣ 📜 prompt_builder.py   # Prompt 组装模块（三层架构）
+ ┃ ┣ 📜 prompt_builder.py   # Prompt 组装模块（Layer 1 & 2 记忆注入）
  ┃ ┣ 📜 .env.example        # 环境变量模板（复制为 .env 后填写）
  ┃ ┗ 📜 requirements.txt    # Python 依赖清单
  ┣ 📂 src/                  # 前端源码
  ┃ ┣ 📜 App.vue             # 主窗口：桌宠 UI、Live2D、气泡、语音
  ┃ ┣ 📜 SettingsApp.vue     # 设置窗口：LLM / 角色 / 全局配置
+ ┃ ┣ 📜 HistoryApp.vue      # 记忆窗口：聊天记录、日记本、摘要管理
  ┃ ┣ 📜 main.ts             # 主窗口挂载入口
- ┃ ┗ 📜 settings-main.ts    # 设置窗口挂载入口
+ ┃ ┣ 📜 settings-main.ts    # 设置窗口挂载入口
+ ┃ ┗ 📜 history-main.ts     # 记忆窗口挂载入口
  ┣ 📂 src-tauri/            # Rust 容器：窗口穿透、置顶、系统托盘
  ┃ ┣ 📜 tauri.conf.json     # Tauri 核心配置
  ┃ ┗ 📜 Cargo.toml          # Rust 依赖清单
@@ -151,14 +155,18 @@ public/rvc/
  ┃ ┣ 📂 live2d/             # Live2D 模型目录（用户自行放置）
  ┃ ┣ 📂 rvc/                # RVC 音色目录（用户自行放置）
  ┃ ┗ 📜 avatar.png          # 默认角色头像（Rei）
+ ┣ 📂 data/                 # 本地数据存储（程序自动生成，不纳入版本控制）
+ ┃ ┣ 📂 vector_db/          # ChromaDB 向量长期摘要数据库
+ ┃ ┗ 📜 chat_history.db     # SQLite 聊天记录与日记本数据库
  ┣ 📂 venv/                 # Python 虚拟环境（不纳入版本控制）
  ┣ 📜 index.html            # 主窗口 HTML 入口
  ┣ 📜 settings.html         # 设置窗口 HTML 入口
+ ┣ 📜 history.html          # 记忆窗口 HTML 入口
  ┣ 📜 vite.config.ts        # Vite 多页面构建配置
  ┣ 📜 DECISIONS.md          # 开发决策记录
  ┣ 📜 CHANGELOG.md          # 版本更新记录
  ┗ 📜 README.md
-```
+ ```
 
 ---
 
@@ -198,8 +206,8 @@ public/rvc/
 
 ### Phase 3：高级感知与硬核底层 📅 *计划中*
 
-- [ ] 游戏态势感知：CS2 GSI / LOL API / 局部视觉流三策略
-- [ ] 三阶混合记忆架构：短期滑动窗口 + 核心档案 JSON + ChromaDB 向量检索
+- [x] 游戏态势感知：局部视觉流策略（分块像素检测预筛 + VLM 动态解析 + 决策引擎）
+- [x] 三阶混合记忆架构：短期滑动窗口 + 核心档案自动提取 + ChromaDB 向量长期检索
 - [ ] API Key 迁移至 Tauri Rust 加密本地存储
 - [ ] RVC v2 便携式绿色环境：静默下载、隔离解压
 - [ ] Tauri Build 最终打包，发布 v1.0 零环境依赖整合包
