@@ -848,6 +848,8 @@
 
     // ── 拖拽 ────────────────────────────────────────────────────────
     async function startDrag() {
+        // 锁定状态下不允许拖拽（即使穿透暂时关闭用于显示解锁按钮）
+        if (isLocked.value) return;
         await getCurrentWindow().startDragging();
     }
 
@@ -987,6 +989,7 @@
 
             <!-- 角色区 -->
             <div class="mascot-area"
+                 :class="{ locked: isLocked }"
                  @mousedown="startDrag"
                  @mouseenter="onMascotEnter"
                  @mouseleave="onMascotLeave">
@@ -1078,6 +1081,7 @@
         align-items: flex-end;
         justify-content: flex-end;
         width: 100%;
+        position: relative;
     }
 
     /* ── 角色区 ───────────────────────────────────────────────── */
@@ -1095,6 +1099,14 @@
 
         .mascot-area:active {
             cursor: grabbing;
+        }
+
+        .mascot-area.locked {
+            cursor: default;
+        }
+
+        .mascot-area.locked:active {
+            cursor: default;
         }
 
     /* ── Live2D 画布 ──────────────────────────────────────────── */
@@ -1269,7 +1281,9 @@
 
     /* ── 输入面板 ─────────────────────────────────────────────── */
     .input-panel {
-        flex-shrink: 0;
+        position: absolute;
+        right: var(--mascot-w, 280px);
+        bottom: 0;
         width: var(--input-w, 240px);
         height: var(--mascot-h, 380px);
         background: var(--clr-panel-bg);
