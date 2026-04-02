@@ -1,950 +1,126 @@
 <script setup lang="ts">
-    import { ref, nextTick, onMounted, onUnmounted, watch, computed } from "vue";
-    import {
-        getCurrentWindow,
-        PhysicalPosition,
-        LogicalSize,
-        primaryMonitor,
-    } from "@tauri-apps/api/window";
+    import { ref, onMounted, onUnmounted } from "vue";
     import { listen } from "@tauri-apps/api/event";
     import { invoke } from "@tauri-apps/api/core";
-    import * as PIXI from "pixi.js";
-    import { Live2DModel } from "pixi-live2d-display/cubism4";
 
-    // Live2D 需要在使用前注册 PIXI Ticker
-    Live2DModel.registerTicker(PIXI.Ticker);
+    import { useSizePreset }    from "./composables/useSizePreset";
+    import { useLive2D }        from "./composables/useLive2D";
+    import { useTTS }           from "./composables/useTTS";
+    import { useWebSocket }     from "./composables/useWebSocket";
+    import { useWindowManager } from "./composables/useWindowManager";
 
-    // ── 尺寸档位系统 ────────────────────────────────────────────────
-    const SIZE_PRESETS = {
-        small: { baseW: 200, baseH: 270, inputW: 210, bubbleH: 130 },
-        medium: { baseW: 280, baseH: 380, inputW: 240, bubbleH: 160 },
-        large: { baseW: 380, baseH: 510, inputW: 300, bubbleH: 200 },
-    } as const;
+    // ── 1. 尺寸系统（跨模块共享的唯一数据源） ────────────────────────────
+    const { sizeConfig, BASE_W, BASE_H, INPUT_W, BUBBLE_H } = useSizePreset();
 
-    type SizePreset = keyof typeof SIZE_PRESETS;
-
-    const sizePreset = ref<SizePreset>(
-        (localStorage.getItem("rl-size") as SizePreset) || "medium"
-    );
-    const sizeConfig = computed(() => SIZE_PRESETS[sizePreset.value]);
-
-    // 动态尺寸常量（替代 Phase 1 的硬编码常量）
-    const BASE_W = computed(() => sizeConfig.value.baseW);
-    const BASE_H = computed(() => sizeConfig.value.baseH);
-    const INPUT_W = computed(() => sizeConfig.value.inputW);
-    const BUBBLE_H = computed(() => sizeConfig.value.bubbleH);
-
-    // ── 情绪标签系统 ────────────────────────────────────────────────
-    const EMOTION_TAGS = ["happy", "sad", "angry", "shy", "surprised", "neutral", "sigh"] as const;
-    type EmotionTag = typeof EMOTION_TAGS[number];
-    // 精确匹配已知标签
-    const EMOTION_REGEX = /\[(happy|sad|angry|shy|surprised|neutral|sigh)\]/gi;
-    // 兜底正则：清除 LLM 可能造出的任何未知 [xxx] 标签
-    const UNKNOWN_TAG_REGEX = /\[[a-zA-Z]+\]/gi;
-
-    /** 从 AI 回复中提取情绪标签，返回干净文本 + 情绪名称 */
-    function parseEmotion(text: string): { cleanText: string; emotion: EmotionTag | null } {
-        const match = text.match(EMOTION_REGEX);
-        const emotion = match
-            ? (match[0].slice(1, -1).toLowerCase() as EmotionTag)
-            : null;
-        // 先剥离已知标签，再用兜底正则清除任何残留未知标签
-        const cleanText = text
-            .replace(EMOTION_REGEX, "")
-            .replace(UNKNOWN_TAG_REGEX, "")
-            .replace(/\s{2,}/g, " ")
-            .trim();
-        return { cleanText, emotion };
-    }
-
-    // ── Live2D 状态 ─────────────────────────────────────────────────
+    // ── 2. Live2D（表情 + 口型驱动，对其他模块无感知） ───────────────────
     const canvasRef = ref<HTMLCanvasElement | null>(null);
-    const live2dReady = ref(false);   // 模型加载成功
-    const live2dError = ref(false);   // 加载失败（Core 未就绪等）
-
-    let pixiApp: PIXI.Application | null = null;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let live2dModel: any = null;
-    let live2dContainer: PIXI.Container | null = null;
-    let renderTexture: PIXI.RenderTexture | null = null;
-
-    // ── 帧切换参数保护系统 ──────────────────────────────────────
-    // 某些手绘线稿模型（如 MO）用 stepped 插值在 0/1 之间跳变来切换帧。
-    // pixi-live2d-display 有两个机制会破坏这种跳变：
-    //   1. motion crossfade：loop 重启时新旧动作权重混合，stepped 值被线性插值
-    //   2. 物理引擎：对同组参数做惯性平滑
-    // 两者都导致参数值停在中间（0.4~0.8），多帧线稿同时半透明叠加 = 白色/闪烁。
-    //
-    // 解决方案（双保险）：
-    //   A. 模型加载后，将所有 idle motion 实例的 fadeIn/fadeOut 权重设为 0（消除 crossfade）
-    //   B. 每帧渲染前，将 stepped 参数强制二值化（消除残留平滑）
-    //
-    // 自动检测：解析 idle motion 文件的 Segments，
-    // 查找 stepped 插值（type 2）的参数——只对检测到的模型生效。
-
-    /** 当前需要二值化钳制的参数 ID 列表（其他模型为空数组，零开销跳过） */
-    let steppedParamIds: string[] = [];
-
-    /**
-     * 模型加载后调用：
-     * 1. 检测 idle motion 中的 stepped 参数
-     * 2. 禁用已加载 motion 实例的 fadeIn/fadeOut
-     * 3. 记录需要二值化的参数 ID
-     */
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    async function setupFrameSwitchProtection(model: any, modelPath: string) {
-        steppedParamIds = [];
-
-        // ── Step 1: 解析 motion 文件，检测 stepped 参数 ─────────
-        let detected: string[] = [];
-        try {
-            const modelRes = await fetch("/" + modelPath);
-            if (!modelRes.ok) return;
-            const modelData = await modelRes.json();
-            const idleList = modelData?.FileReferences?.Motions?.Idle;
-            if (!Array.isArray(idleList) || idleList.length === 0) return;
-
-            const motionRel = idleList[0].File;
-            if (!motionRel) return;
-            const modelDir = modelPath.substring(0, modelPath.lastIndexOf("/"));
-            const motionRes = await fetch("/" + modelDir + "/" + motionRel);
-            if (!motionRes.ok) return;
-            const motionData = await motionRes.json();
-
-            const curves = motionData?.Curves;
-            if (!Array.isArray(curves)) return;
-
-            for (const curve of curves) {
-                if (curve.Target !== "Parameter") continue;
-                const segs: number[] = curve.Segments;
-                if (!Array.isArray(segs)) continue;
-
-                let hasStepped = false;
-                let i = 2; // 跳过首个控制点 [time, value]
-                while (i < segs.length) {
-                    const t = segs[i];
-                    if (t === 0) i += 3;       // linear
-                    else if (t === 1) i += 7;  // bezier
-                    else if (t === 2 || t === 3) { hasStepped = true; i += 3; } // stepped
-                    else break;
-                }
-                if (hasStepped) detected.push(curve.Id);
-            }
-        } catch (e) {
-            console.warn("[Live2D] stepped 参数检测失败:", e);
-            return;
-        }
-
-        if (detected.length === 0) return;
-
-        // ── Step 2: 禁用已加载 motion 实例的 fade 权重 ──────────
-        // pixi-live2d-display 在 motionManager 内部缓存了已加载的 Motion 实例。
-        // 即使 definitions 上 FadeInTime=0，已创建的实例可能带有默认 fade。
-        // 遍历 motionManager 内部缓存，将 Idle 组的 fade 全部归零。
-        try {
-            const mm = model.internalModel.motionManager;
-            if (mm) {
-                // motionManager.motionGroups: Map<string, CubismMotion[]>
-                // 或 motionManager._motionGroups（不同版本命名不同）
-                const groups = mm.motionGroups ?? mm._motionGroups;
-                if (groups) {
-                    const idleMotions = groups.Idle ?? groups.idle;
-                    if (Array.isArray(idleMotions)) {
-                        for (const motion of idleMotions) {
-                            if (motion) {
-                                // CubismMotion 实例的 fade 属性
-                                if (typeof motion.setFadeInTime === "function") motion.setFadeInTime(0);
-                                if (typeof motion.setFadeOutTime === "function") motion.setFadeOutTime(0);
-                                // 有些版本用属性而非方法
-                                if ("_fadeInSeconds" in motion) motion._fadeInSeconds = 0;
-                                if ("_fadeOutSeconds" in motion) motion._fadeOutSeconds = 0;
-                            }
-                        }
-                        console.info(`[Live2D] 已禁用 ${idleMotions.length} 个 idle motion 的 crossfade`);
-                    }
-                }
-                // 同时修改 definitions（影响后续新创建的 motion 实例）
-                const defs = mm.definitions?.Idle ?? mm.definitions?.idle;
-                if (Array.isArray(defs)) {
-                    for (const def of defs) {
-                        def.FadeInTime = 0;
-                        def.FadeOutTime = 0;
-                    }
-                }
-                // motionManager 自身的默认 fade
-                if ("_fadeInTime" in mm) mm._fadeInTime = 0;
-                if ("_fadeOutTime" in mm) mm._fadeOutTime = 0;
-            }
-        } catch (e) {
-            console.warn("[Live2D] fade 禁用失败（将依赖二值化钳制）:", e);
-        }
-
-        // ── Step 3: hook 模型 update，在 motion+physics 之后强制二值化 ──
-        // pixi-live2d-display 的渲染流程：
-        //   motionManager.update() → physics.update() → coreModel.update()
-        // 我们需要在 coreModel.update() 之前插入二值化。
-        // 方法：包装 internalModel 的 update 方法，在原始 update 执行后、
-        // coreModel.update 被调用前修正参数值。
-        // 但实际上 coreModel.update 是在 internalModel.update 内部调用的，
-        // 所以更可靠的方式是直接 hook coreModel.update。
-        steppedParamIds = detected;
-        try {
-            const core = model.internalModel.coreModel;
-            const originalUpdate = core.update.bind(core);
-            const paramIds = core._model.parameters.ids;
-            const paramVals = core._model.parameters.values;
-            // 预计算参数索引，避免每帧查找
-            const idxMap: number[] = [];
-            for (const id of detected) {
-                const idx = paramIds.indexOf(id);
-                if (idx >= 0) idxMap.push(idx);
-            }
-            core.update = function () {
-                // 在 coreModel.update() 执行前（此时 motion+physics 已写入参数值），
-                // 将 stepped 参数强制二值化
-                for (const idx of idxMap) {
-                    paramVals[idx] = paramVals[idx] >= 0.5 ? 1 : 0;
-                }
-                return originalUpdate();
-            };
-            console.info(
-                `[Live2D] 帧切换保护已启用：${detected.length} 个参数 ` +
-                `(${detected.join(", ")})，已 hook coreModel.update 进行二值化`
-            );
-        } catch (e) {
-            console.warn("[Live2D] coreModel hook 失败，回退到 ticker 二值化:", e);
-            // 回退：steppedParamIds 不清空，ticker 中的二值化作为后备
-        }
-    }
-
-    // ── 模型个性化配置读写 ──────────────────────────────────────
-    // 以模型路径为 key，存储每个模型的 zoom/y 偏移
-    // 格式：{ "live2d/hiyori_vts/hiyori.model3.json": { zoom: 1.7, y: -80 }, ... }
-    const MODEL_SETTINGS_KEY = "rl-model-settings";
-    const DEFAULT_MODEL_ZOOM = 1.7;
-    const DEFAULT_MODEL_Y = -80;
-
-    function getModelSettings(path: string): { zoom: number; y: number } {
-        try {
-            const all = JSON.parse(localStorage.getItem(MODEL_SETTINGS_KEY) ?? "{}");
-            const s = all[path];
-            if (s && typeof s.zoom === "number" && typeof s.y === "number") return s;
-        } catch { /* corrupt data, use defaults */ }
-        return { zoom: DEFAULT_MODEL_ZOOM, y: DEFAULT_MODEL_Y };
-    }
-
-    function saveModelSettings(path: string, zoom: number, y: number) {
-        try {
-            const all = JSON.parse(localStorage.getItem(MODEL_SETTINGS_KEY) ?? "{}");
-            all[path] = { zoom, y };
-            localStorage.setItem(MODEL_SETTINGS_KEY, JSON.stringify(all));
-        } catch { /* ignore */ }
-    }
-
-    /**
-     * 初始化 PIXI + Live2D 模型。
-     * ⚠️  需要 public/live2dcubismcore.min.js 已加载（见 index.html 注释）。
-     */
-    async function initLive2D() {
-        if (!canvasRef.value) return;
-
-        if (typeof (window as any).Live2DCubismCore === "undefined") {
-            console.warn("[Live2D] Cubism Core 未加载，请放入 public/ 并取消注释 index.html 中的 script 标签。");
-            live2dError.value = true;
-            return;
-        }
-
-        const w = BASE_W.value;
-        const h = BASE_H.value;
-
-        // ❌ 不设置 preserveDrawingBuffer（默认 false）
-        // preserveDrawingBuffer: true 会禁用 WebGL 前后缓冲交换机制，
-        // 导致 clear 瞬间 DWM 截到空白帧，是闪烁的根本原因。
-        pixiApp = new PIXI.Application({
-            view: canvasRef.value,
-            backgroundAlpha: 0,
-            width: w,
-            height: h,
-            antialias: true,
-            resolution: 1,
-            autoDensity: false,
-            powerPreference: "high-performance",
-        });
-
-        const renderer = pixiApp.renderer as PIXI.Renderer;
-
-        // 第一层保护：RenderTexture
-        // Live2D 多 Draw Call → 离屏纹理（GPU 显存内，DWM 完全不可见）
-        // 确保纹理内容始终是完整帧
-        renderTexture = PIXI.RenderTexture.create({ width: w, height: h });
-        const displaySprite = new PIXI.Sprite(renderTexture);
-        pixiApp.stage.addChild(displaySprite);
-
-        // Live2D 放在独立容器，不直接上 stage
-        live2dContainer = new PIXI.Container();
-
-        try {
-            const modelPath = localStorage.getItem("rl-model-path") ?? "live2d/MO/MO.model3.json";
-            live2dModel = await Live2DModel.from("/" + modelPath, {
-                autoInteract: false,
-            });
-
-            const modelSettings = getModelSettings(modelPath);
-            const zoom = modelSettings.zoom;
-            const scale = (w / live2dModel.internalModel.originalWidth) * zoom;
-            live2dModel.scale.set(scale);
-            live2dModel.anchor.set(0.5, 0);
-            live2dModel.x = w / 2;
-            live2dModel.y = modelSettings.y;
-
-            live2dContainer.addChild(live2dModel);
-
-            // 直接设置 Part 透明度，归位多状态手臂部件
-            // hiyori 等有 PartArmA/PartArmB 的模型：显示 A（正常垂手），隐藏 B（举手姿态）
-            // 没有这些 Part 的模型调用后静默忽略
-            try {
-                const core = live2dModel.internalModel.coreModel;
-                core.setPartOpacityById("PartArmA", 1);
-                core.setPartOpacityById("PartArmB", 0);
-            } catch { /* 该模型无此 Part，忽略 */ }
-
-            // 帧切换保护：检测 stepped 参数 + 禁用 crossfade + 启用二值化
-            setupFrameSwitchProtection(live2dModel, modelPath);
-
-        } catch (e) {
-            console.error("[Live2D] 模型加载失败:", e);
-            live2dError.value = true;
-            return;
-        }
-
-        // 第二层保护：WebGL 双缓冲（默认行为，不破坏它）
-        // 用 PIXI Ticker.add() 在每帧渲染前把 Live2D 先画到离屏纹理
-        // Ticker 回调先于 PIXI 自动 stage render 执行，时序有保证
-        // clear canvas + draw Sprite → 后缓冲，rAF 结束原子交换到前缓冲
-        // DWM 永远只看前缓冲 → 永远是完整帧
-        pixiApp.ticker.add(() => {
-            // ── 帧切换参数二值化钳制 ──────────────────────────────
-            // 在物理/motion 更新之后、渲染之前的最后一刻强制修正。
-            // steppedParamIds 为空时（大多数模型）直接跳过，零开销。
-            if (steppedParamIds.length > 0 && live2dModel && live2dReady.value) {
-                try {
-                    const core = live2dModel.internalModel.coreModel;
-                    const ids = core._model.parameters.ids;
-                    const vals = core._model.parameters.values;
-                    for (const id of steppedParamIds) {
-                        const idx = ids.indexOf(id);
-                        if (idx >= 0) {
-                            vals[idx] = vals[idx] >= 0.5 ? 1 : 0;
-                        }
-                    }
-                } catch { /* ignore */ }
-            }
-            renderer.render(live2dContainer, { renderTexture, clear: true });
-        });
-
-        live2dReady.value = true;
-    }
-
-    // ── 表情系统 ────────────────────────────────────────────────
-    let emotionResetTimer: ReturnType<typeof setTimeout> | null = null;
-
-    /**
-     * 检测模型是否有注册表情文件（exp3.json）
-     * pixi-live2d-display 把表情存在 expressionManager.definitions 里
-     */
-    function modelHasExpressions(): boolean {
-        try {
-            const defs = live2dModel?.internalModel?.motionManager
-                ?.expressionManager?.definitions;
-            return Array.isArray(defs) && defs.length > 0;
-        } catch { return false; }
-    }
-
-    /**
-     * 无表情文件时的参数回退方案。
-     * 使用 Live2D 官方标准参数名直接操控面部，覆盖绝大多数标准模型。
-     * 有参数不存在时 setParameterValueById 会静默忽略，不会报错。
-     */
-    function applyEmotionByParams(emotion: EmotionTag) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const core: any = live2dModel?.internalModel?.coreModel;
-        if (!core) return;
-
-        const set = (id: string, v: number) => {
-            try { core.setParameterValueById(id, v); } catch { /* ignore */ }
-        };
-
-        // 先归位所有情绪参数，再按情绪叠加
-        set("ParamMouthForm", 0);
-        set("ParamMouthOpenY", 0);
-        set("ParamEyeLOpen", 1);
-        set("ParamEyeROpen", 1);
-        set("ParamBrowLY", 0);
-        set("ParamBrowRY", 0);
-        set("ParamBrowLForm", 0);
-        set("ParamBrowRForm", 0);
-        // 腮红/Cheek 参数：不同模型名字不同，尝试常见命名
-        set("Param74", 0); // MO 模型
-        set("ParamCheek", 0); // 标准命名
-
-        switch (emotion) {
-            case "happy":
-                set("ParamMouthForm", 1.0);
-                set("ParamEyeLOpen", 0.6);   // 眯眼笑
-                set("ParamEyeROpen", 0.6);
-                set("ParamBrowLY", 0.6);   // 眉毛上扬
-                set("ParamBrowRY", 0.6);
-                set("Param74", 2.0);   // MO 腮红
-                set("ParamCheek", 1.0);   // 标准腮红
-                break;
-            case "sad":
-                set("ParamMouthForm", -1.0);
-                set("ParamEyeLOpen", 0.7);   // 眼睛微垂
-                set("ParamEyeROpen", 0.7);
-                set("ParamBrowLY", -1.0);  // 眉毛大幅压低
-                set("ParamBrowRY", -1.0);
-                set("ParamBrowLForm", -1.0);
-                set("ParamBrowRForm", -1.0);
-                break;
-            case "angry":
-                set("ParamMouthForm", -1.0);  // 更夸张的嘴角下撇
-                set("ParamBrowLY", -1.0);
-                set("ParamBrowRY", -1.0);
-                set("ParamBrowLForm", -1.0);
-                set("ParamBrowRForm", -1.0);
-                set("ParamEyeLOpen", 1.4);   // 瞪眼
-                set("ParamEyeROpen", 1.4);
-                break;
-            case "shy":
-                set("ParamMouthForm", 0.8);
-                set("ParamEyeLOpen", 0.5);   // 眼睛更多低垂
-                set("ParamEyeROpen", 0.5);
-                set("ParamBrowLY", -0.3);  // 眉毛稍降，配合害羞
-                set("ParamBrowRY", -0.3);
-                set("Param74", 2.0);   // 腮红全开
-                set("ParamCheek", 1.0);
-                break;
-            case "surprised":
-                set("ParamMouthOpenY", 0.8);   // 嘴张更大
-                set("ParamMouthForm", 0.3);
-                set("ParamBrowLY", 1.0);
-                set("ParamBrowRY", 1.0);
-                set("ParamEyeLOpen", 2.0);   // 眼睛尽量睁大（超过默认值）
-                set("ParamEyeROpen", 2.0);
-                break;
-            case "sigh":
-                // 暂无专属表情参数，后续 Live2D 表情匹配时补充
-                // 当前效果：归位到默认状态（已在 switch 前归位）
-                break;
-            case "neutral":
-            default:
-                break; // 已在上方归位
-        }
-    }
-
-    /** 触发情绪表情，3 秒后自动归位 neutral */
-    function setEmotion(emotion: EmotionTag) {
-        if (!live2dModel || !live2dReady.value) return;
-        if (emotionResetTimer) clearTimeout(emotionResetTimer);
-
-        if (modelHasExpressions()) {
-            // 有表情文件（exp3.json）：走官方 expression 接口
-            live2dModel.expression(emotion);
-        } else {
-            // 无表情文件：直接操控标准参数，兼容绝大多数模型
-            applyEmotionByParams(emotion);
-        }
-
-        if (emotion !== "neutral") {
-            emotionResetTimer = setTimeout(() => {
-                if (!live2dModel || !live2dReady.value) return;
-                if (modelHasExpressions()) {
-                    live2dModel.expression("neutral");
-                } else {
-                    applyEmotionByParams("neutral");
-                }
-            }, 3000);
-        }
-    }
-
-    /**
-     * 设置嘴部开合参数（由唇音同步模块调用）
-     * @param value  0.0（闭合）~ 1.0（全开），映射到 ParamMouthOpenY（0~2.1）
-     */
-    function setMouthOpen(value: number) {
-        if (!live2dModel || !live2dReady.value) return;
-        const mapped = Math.max(0, Math.min(1, value)) * 2.1;
-        try {
-            live2dModel.internalModel.coreModel.setParameterValueById("ParamMouthOpenY", mapped);
-        } catch { /* ignore */ }
-    }
-
-    // ── TTS 语音系统 ─────────────────────────────────────────────
-    const TTS_CONFIG_KEY = "rl-tts";
-    let audioCtx: AudioContext | null = null;
-    let lipSyncRafId = 0;
-    let currentAudio: HTMLAudioElement | null = null;
-
-    function getTTSConfig() {
-        try {
-            const cfg = JSON.parse(localStorage.getItem(TTS_CONFIG_KEY) ?? "{}");
-            return {
-                engine: (cfg.engine ?? "elevenlabs") as "elevenlabs" | "rvc",
-                enabled: cfg.enabled ?? false,
-                elApiKey: cfg.el_api_key ?? cfg.api_key ?? "",
-                elVoiceId: cfg.el_voice_id ?? cfg.voice_id ?? "",
-                rvcPth: cfg.rvc_pth ?? "",
-                rvcIndex: cfg.rvc_index ?? "",
-                rvcEdgeVoice: cfg.rvc_edge_voice ?? "zh-CN-XiaoxiaoNeural",
-            };
-        } catch {
-            return {
-                engine: "elevenlabs" as const, enabled: false,
-                elApiKey: "", elVoiceId: "",
-                rvcPth: "", rvcIndex: "", rvcEdgeVoice: "zh-CN-XiaoxiaoNeural"
-            };
-        }
-    }
-
-    /** 停止当前播放并取消唇音同步 */
-    function stopTTS() {
-        if (lipSyncRafId) { cancelAnimationFrame(lipSyncRafId); lipSyncRafId = 0; }
-        if (currentAudio) { currentAudio.pause(); currentAudio = null; }
-        setMouthOpen(0);
-    }
-
-    /** 播放音频 Blob 并驱动唇音同步 */
-    async function playAudioBlob(blob: Blob) {
-        const url = URL.createObjectURL(blob);
-        const audio = new Audio(url);
-        currentAudio = audio;
-
-        if (!audioCtx || audioCtx.state === "closed") audioCtx = new AudioContext();
-        const source = audioCtx.createMediaElementSource(audio);
-        const analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 256;
-        source.connect(analyser);
-        analyser.connect(audioCtx.destination);
-
-        const dataArray = new Uint8Array(analyser.frequencyBinCount);
-        function lipSyncLoop() {
-            if (!currentAudio || currentAudio.paused || currentAudio.ended) {
-                setMouthOpen(0); lipSyncRafId = 0; return;
-            }
-            analyser.getByteFrequencyData(dataArray);
-            const avg = dataArray.slice(0, 16).reduce((a, b) => a + b, 0) / 16;
-            setMouthOpen(Math.min(1, avg / 80));
-            lipSyncRafId = requestAnimationFrame(lipSyncLoop);
-        }
-
-        audio.addEventListener("play", () => { lipSyncRafId = requestAnimationFrame(lipSyncLoop); });
-        audio.addEventListener("ended", () => { setMouthOpen(0); URL.revokeObjectURL(url); });
-        audio.addEventListener("error", () => { setMouthOpen(0); URL.revokeObjectURL(url); });
-        await audio.play();
-    }
-
-    /**
-     * 根据用户配置的引擎合成语音并播放。
-     * ElevenLabs → POST /api/tts
-     * 本地 RVC   → POST /api/tts/local
-     */
-    async function speakText(text: string) {
-        const cfg = getTTSConfig();
-        if (!cfg.enabled || !text.trim()) return;
-        stopTTS();
-        try {
-            let res: Response;
-            if (cfg.engine === "elevenlabs") {
-                if (!cfg.elApiKey || !cfg.elVoiceId) return;
-                res = await fetch("http://localhost:18000/api/tts", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ text, api_key: cfg.elApiKey, voice_id: cfg.elVoiceId }),
-                });
-            } else {
-                if (!cfg.rvcPth) return;
-                res = await fetch("http://localhost:18000/api/tts/local", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        text,
-                        pth: cfg.rvcPth,
-                        index: cfg.rvcIndex,
-                        edge_voice: cfg.rvcEdgeVoice,
-                    }),
-                });
-            }
-            if (!res.ok) { console.warn("[TTS] 请求失败:", res.status); return; }
-            await playAudioBlob(await res.blob());
-        } catch (e) {
-            console.warn("[TTS] 播放失败:", e);
-            setMouthOpen(0);
-        }
-    }
-
-    /** 销毁 PIXI 实例（onUnmounted 或切换模型时调用） */
-    function disposeLive2D() {
-        if (live2dModel && live2dContainer) {
-            live2dContainer.removeChild(live2dModel);
-        }
-        if (live2dContainer) {
-            live2dContainer.destroy({ children: true });
-            live2dContainer = null;
-        }
-        if (renderTexture) {
-            renderTexture.destroy(true);
-            renderTexture = null;
-        }
-        if (pixiApp) {
-            pixiApp.destroy(false, { children: true });
-            pixiApp = null;
-        }
-        live2dModel = null;
-        live2dReady.value = false;
-        live2dError.value = false;
-    }
-
-    /** 切换模型：只换模型，保留 pixiApp/canvas/ticker/renderTexture */
-    async function reloadLive2D(newPath: string) {
-        localStorage.setItem("rl-model-path", newPath);
-
-        if (!pixiApp || !live2dContainer) {
-            await initLive2D();
-            return;
-        }
-
-        live2dReady.value = false;
-
-        if (live2dModel) {
-            live2dContainer.removeChild(live2dModel);
-            live2dModel.destroy();
-            live2dModel = null;
-        }
-
-        try {
-            live2dModel = await Live2DModel.from("/" + newPath, { autoInteract: false });
-            const w = BASE_W.value;
-            const modelSettings = getModelSettings(newPath);
-            const zoom = modelSettings.zoom;
-            const scale = (w / live2dModel.internalModel.originalWidth) * zoom;
-            live2dModel.scale.set(scale);
-            live2dModel.anchor.set(0.5, 0);
-            live2dModel.x = w / 2;
-            live2dModel.y = modelSettings.y;
-            live2dContainer.addChild(live2dModel);
-
-            try {
-                const core = live2dModel.internalModel.coreModel;
-                core.setPartOpacityById("PartArmA", 1);
-                core.setPartOpacityById("PartArmB", 0);
-            } catch { /* 该模型无此 Part，忽略 */ }
-
-            // 帧切换保护
-            setupFrameSwitchProtection(live2dModel, newPath);
-
-            live2dReady.value = true;
-            console.info(`[Live2D] 模型切换成功 ✓  (${newPath})`);
-        } catch (e) {
-            console.error("[Live2D] 模型切换失败:", e);
-            live2dError.value = true;
-        }
-    }
-
-
-    // ── 对话气泡超时保护 ────────────────────────────────────────────
-    let thinkingTimer: ReturnType<typeof setTimeout> | null = null;
-
-    // ── 窗口状态 ────────────────────────────────────────────────────
-    const isConnected = ref(false);
-    const isThinking = ref(false);
-    const inputOpen = ref(false);
-    const userInput = ref("");
-    const bubbleText = ref("");
-    const showBubble = ref(false);
-    const inputRef = ref<HTMLTextAreaElement | null>(null);
-    const isLocked = ref(false);
-    const showControls = ref(false);
-    const showUnlock = ref(false);
-
-    // ── 控制栏悬停 ──────────────────────────────────────────────────
-    let hideControlsTimer: ReturnType<typeof setTimeout> | null = null;
-
-    function onMascotEnter() {
-        if (isLocked.value) return;
-        if (hideControlsTimer) clearTimeout(hideControlsTimer);
-        showControls.value = true;
-    }
-
-    function onMascotLeave() {
-        if (isLocked.value) return;
-        hideControlsTimer = setTimeout(() => { showControls.value = false; }, 600);
-    }
-
-    // ── 锁定 / 解锁 ─────────────────────────────────────────────────
-    async function toggleLock() {
-        const newState = await invoke<boolean>("toggle_lock");
-        isLocked.value = newState;
-        if (newState) {
-            showControls.value = false;
-            inputOpen.value = false;
-        }
-    }
-
-    async function unlockFromButton() {
-        const newState = await invoke<boolean>("toggle_lock");
-        isLocked.value = newState;
-        showUnlock.value = false;
-    }
-
-    // ── 设置窗口 ────────────────────────────────────────────────────
-    async function openSettings() {
-        await invoke("open_settings");
-    }
-
-    // ── 聊天记录窗口 ─────────────────────────────────────────────────
-    async function openHistory() {
-        await invoke("open_history");
-    }
-
-    // ── 动态窗口缩放 ────────────────────────────────────────────────
-    async function resizeToFit() {
-        const win = getCurrentWindow();
-        const pos = await win.outerPosition();
-        const siz = await win.outerSize();
-        const sf = (await primaryMonitor())?.scaleFactor ?? 1;
-
-        const anchorX = pos.x + siz.width;
-        const anchorY = pos.y + siz.height;
-
-        const newLogicW = BASE_W.value + (inputOpen.value ? INPUT_W.value : 0);
-        const newLogicH = BASE_H.value + (showBubble.value || isThinking.value ? BUBBLE_H.value : 0);
-
-        const newPhysW = Math.round(newLogicW * sf);
-        const newPhysH = Math.round(newLogicH * sf);
-
-        await win.setSize(new LogicalSize(newLogicW, newLogicH));
-        await win.setPosition(new PhysicalPosition(anchorX - newPhysW, anchorY - newPhysH));
-    }
-
-    watch([inputOpen, showBubble, isThinking], resizeToFit);
-
-    // ── WebSocket ───────────────────────────────────────────────────
-    const WS_URL = "ws://localhost:18000/ws/chat";
-    let ws: WebSocket | null = null;
-
-    function connectWS() {
-        ws = new WebSocket(WS_URL);
-        ws.onopen = () => {
-            isConnected.value = true;
-            // WS 建立后自动把本地已保存的配置发给后端，无需用户手动保存
-            const savedLLM = localStorage.getItem("rl-llm");
-            const savedChar = localStorage.getItem("rl-character");
-            if (savedLLM || savedChar) {
-                const llmCfg = savedLLM ? JSON.parse(savedLLM) : {};
-                const charCfg = savedChar ? JSON.parse(savedChar) : {};
-                const savedWindowIdx = parseInt(localStorage.getItem("rl-memory-window") ?? "1", 10);
-                const savedCharId = localStorage.getItem("rl-active-preset-id") ?? "";
-                let visionCfg: object | undefined;
-                try {
-                    const v = localStorage.getItem("rl-vision");
-                    visionCfg = v ? JSON.parse(v) : undefined;
-                } catch { visionCfg = undefined; }
-                ws!.send(JSON.stringify({
-                    type: "configure",
-                    llm: llmCfg,
-                    character: charCfg,
-                    memory_window: isNaN(savedWindowIdx) ? 1 : savedWindowIdx,
-                    character_id: savedCharId,
-                    ...(visionCfg ? { vision: visionCfg } : {}),
-                }));
-            }
-        };
-        ws.onclose = () => { isConnected.value = false; setTimeout(connectWS, 3000); };
-        ws.onerror = () => { ws?.close(); };
-        ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-
-            if (data.type === "chat_response") {
-                isThinking.value = false;
-                if (thinkingTimer) clearTimeout(thinkingTimer);
-
-                // ① 提取情绪标签，剥离后再显示
-                const { cleanText, emotion } = parseEmotion(data.message);
-                if (emotion) setEmotion(emotion);
-                showBubbleWithText(cleanText);
-                // ② 语音播放（配置未启用时静默跳过）
-                speakText(cleanText);
-
-            } else if (data.type === "vision_proactive_speech") {
-                // 视觉感知主动发言（桌宠自己说话，非回复用户）
-                if (!isThinking.value) {
-                    const { cleanText, emotion } = parseEmotion(data.message);
-                    if (emotion) setEmotion(emotion);
-                    showBubbleWithText(cleanText);
-                    speakText(cleanText);
-                }
-
-            } else if (data.type === "error") {
-                isThinking.value = false;
-                if (thinkingTimer) clearTimeout(thinkingTimer);
-                showBubbleWithText("呜…出错了：" + data.message);
-            }
-        };
-    }
-
-    // ── 打字机动画 ──────────────────────────────────────────────────
-    let typeTimer: ReturnType<typeof setTimeout> | null = null;
-    let hideTimer: ReturnType<typeof setTimeout> | null = null;
-
-    function showBubbleWithText(text: string) {
-        if (typeTimer) clearTimeout(typeTimer);
-        if (hideTimer) clearTimeout(hideTimer);
-        bubbleText.value = "";
-        showBubble.value = true;
-        let i = 0;
-        function typeNext() {
-            if (i < text.length) {
-                bubbleText.value += text[i++];
-                typeTimer = setTimeout(typeNext, 40);
-            } else {
-                hideTimer = setTimeout(() => { showBubble.value = false; }, 8000);
-            }
-        }
-        typeNext();
-    }
-
-    // ── 发送消息 ────────────────────────────────────────────────────
-    function sendMessage() {
+    const {
+        live2dReady, live2dError,
+        initLive2D, disposeLive2D, reloadLive2D,
+        setEmotion, setMouthOpen,
+    } = useLive2D(canvasRef, BASE_W, BASE_H);
+
+    // ── 3. TTS（通过依赖注入接收 setMouthOpen，对 Live2D 无感知） ────────
+    const { speakText, stopTTS, destroyTTS } = useTTS({ setMouthOpen });
+
+    // ── 4. WebSocket（通过回调联结各模块，自身不引用任何其他 composable） ──
+    // 注意：回调中引用的 showBubbleWithText 在下方第 5 步定义。
+    // 由于回调是闭包（仅在消息到达时执行），到那时 showBubbleWithText 已初始化，安全。
+    const {
+        isConnected, isThinking,
+        connectWS, disconnectWS,
+        sendMessage, sendConfigure,
+    } = useWebSocket({
+        onChatResponse: (cleanText, emotion) => {
+            if (emotion) setEmotion(emotion);
+            showBubbleWithText(cleanText);
+            speakText(cleanText);
+        },
+        onVisionSpeech: (cleanText, emotion) => {
+            // 视觉感知主动发言：已在 useWebSocket 内部过滤 isThinking，此处直接处理
+            if (emotion) setEmotion(emotion);
+            showBubbleWithText(cleanText);
+            speakText(cleanText);
+        },
+        onError: (message) => {
+            showBubbleWithText("呜…出错了：" + message);
+        },
+    });
+
+    // ── 5. 窗口管理（接收 isThinking 用于 resizeToFit watch） ─────────────
+    const {
+        inputOpen, userInput, bubbleText, showBubble,
+        isLocked, showControls, showUnlock, inputRef,
+        showBubbleWithText, toggleInput,
+        onMascotEnter, onMascotLeave,
+        toggleLock, unlockFromButton,
+        startDrag, initWindowPosition,
+    } = useWindowManager({ isThinking, BASE_W, BASE_H, INPUT_W, BUBBLE_H });
+
+    // ── 发送消息（在 App.vue 层组合 WS 发送 + 本地 UI 状态重置） ─────────
+    function handleSend() {
         const msg = userInput.value.trim();
         if (!msg || !isConnected.value || isThinking.value) return;
-
-        isThinking.value = true;
-        showBubble.value = false;
-        userInput.value = "";
-
-        if (thinkingTimer) clearTimeout(thinkingTimer);
-        thinkingTimer = setTimeout(() => {
-            if (isThinking.value) {
-                isThinking.value = false;
-                showBubbleWithText("响应超时了，请检查网络或配置后重试。");
-            }
-        }, 30000);
-
-        ws!.send(JSON.stringify({ type: "chat", message: msg }));
+        showBubble.value  = false;  // 立即隐藏旧气泡
+        userInput.value   = "";
+        sendMessage(msg);           // 内部设置 isThinking = true 并发送
     }
 
     function handleKeydown(e: KeyboardEvent) {
         if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
-            sendMessage();
+            handleSend();
         }
     }
 
-    // ── 输入框开关 ──────────────────────────────────────────────────
-    function toggleInput() {
-        inputOpen.value = !inputOpen.value;
-        if (inputOpen.value) nextTick(() => inputRef.value?.focus());
-    }
+    // ── 便捷窗口操作（保持在 App.vue 层，逻辑极简不值得单独 composable） ─
+    async function openSettings() { await invoke("open_settings"); }
+    async function openHistory()  { await invoke("open_history"); }
 
-    // ── 拖拽 ────────────────────────────────────────────────────────
-    async function startDrag() {
-        // 锁定状态下不允许拖拽（即使穿透暂时关闭用于显示解锁按钮）
-        if (isLocked.value) return;
-        await getCurrentWindow().startDragging();
-    }
-
-    // ── 生命周期 ────────────────────────────────────────────────────
+    // ── 生命周期 ──────────────────────────────────────────────────────
     const unlisten: (() => void)[] = [];
 
     onMounted(async () => {
+        // WebSocket 连接最优先启动，不受后续 await 影响
         connectWS();
 
-        const win = getCurrentWindow();
-        const sf = (await primaryMonitor())?.scaleFactor ?? 1;
-        const w = BASE_W.value;
-        const h = BASE_H.value;
+        // 初始化窗口位置（锚点恢复 / 首次默认右下角）
+        await initWindowPosition();
 
-        // 恢复上次位置（以右下角为锚点）
-        const saved = localStorage.getItem("mascot-anchor");
-        if (saved) {
-            const { ax, ay } = JSON.parse(saved);
-            const physW = Math.round(w * sf);
-            const physH = Math.round(h * sf);
-            await win.setSize(new LogicalSize(w, h));
-            await win.setPosition(new PhysicalPosition(ax - physW, ay - physH));
-        } else {
-            const monitor = await primaryMonitor();
-            if (monitor) {
-                const { width, height } = monitor.size;
-                const margin = Math.round(16 * sf);
-                const physW = Math.round(w * sf);
-                const physH = Math.round(h * sf);
-                await win.setSize(new LogicalSize(w, h));
-                await win.setPosition(new PhysicalPosition(
-                    width - physW - margin,
-                    height - physH - margin
-                ));
-            }
-        }
-
-        // 记录锚点（右下角）
-        await win.onMoved(async () => {
-            const p = await win.outerPosition();
-            const s = await win.outerSize();
-            localStorage.setItem("mascot-anchor", JSON.stringify({
-                ax: p.x + s.width,
-                ay: p.y + s.height,
-            }));
-        });
-
-        // 事件监听
+        // Tauri 事件监听
         unlisten.push(await listen("config-changed", (e) => {
-            const payload = e.payload as { llm?: object; character?: object; memory_window?: number; character_id?: string; vision?: object };
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({
-                    type: "configure",
-                    llm: payload.llm ?? {},
-                    character: payload.character ?? {},
-                    memory_window: payload.memory_window ?? parseInt(localStorage.getItem("rl-memory-window") ?? "1", 10),
-                    character_id: payload.character_id ?? localStorage.getItem("rl-active-preset-id") ?? "",
-                    ...(payload.vision ? { vision: payload.vision } : {}),
-                }));
-            }
+            const payload = e.payload as {
+                llm?:          object;
+                character?:    object;
+                memory_window?: number;
+                character_id?: string;
+                vision?:       object;
+            };
+            sendConfigure(payload);
         }));
+
         unlisten.push(await listen("mascot-hover", (e) => {
             showUnlock.value = e.payload as boolean;
         }));
+
         unlisten.push(await listen("open-settings", async () => {
             await invoke("open_settings");
         }));
 
-        // 监听设置界面发来的模型切换事件
         unlisten.push(await listen("model-changed", async (e) => {
             const path = (e.payload as { path: string }).path;
             await reloadLive2D(path);
         }));
 
-        unlisten.push(await listen("config-changed", (e) => {
-            const payload = e.payload as { llm?: object; character?: object };
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({
-                    type: "configure",
-                    llm: payload.llm ?? {},
-                    character: payload.character ?? {},
-                }));
-            }
-        }));
-
-        // ── Live2D 初始化（最后执行，不阻塞其他逻辑）──────────────
+        // Live2D 初始化（最后执行，不阻塞上方逻辑）
         await initLive2D();
     });
 
     onUnmounted(() => {
-        ws?.close();
+        disconnectWS();
         unlisten.forEach(fn => fn());
         disposeLive2D();
-        stopTTS();
-        audioCtx?.close();
+        destroyTTS();
     });
 </script>
 
@@ -981,7 +157,7 @@
                               @keydown="handleKeydown" />
                     <button class="send-btn"
                             :disabled="!isConnected || isThinking || !userInput.trim()"
-                            @click="sendMessage">
+                            @click="handleSend">
                         {{ isThinking ? "…" : "发送" }}
                     </button>
                 </div>
@@ -1006,21 +182,11 @@
                 <!-- 控制栏（未锁定时悬停显示） -->
                 <transition name="controls">
                     <div v-if="showControls && !isLocked" class="controls-bar">
-                        <button class="ctrl-btn" @mousedown.stop @click.stop="toggleLock" title="锁定">
-                            🔓
-                        </button>
-                        <button class="ctrl-btn" @mousedown.stop @click.stop="openSettings" title="设置">
-                            ⚙️
-                        </button>
-                        <button class="ctrl-btn" @mousedown.stop @click.stop="openHistory" title="聊天记录">
-                            📋
-                        </button>
-                        <button class="ctrl-btn" @mousedown.stop @click.stop title="音量">
-                            🔊
-                        </button>
-                        <button class="ctrl-btn" @mousedown.stop @click.stop="toggleInput" title="输入">
-                            💬
-                        </button>
+                        <button class="ctrl-btn" @mousedown.stop @click.stop="toggleLock"    title="锁定">🔓</button>
+                        <button class="ctrl-btn" @mousedown.stop @click.stop="openSettings"  title="设置">⚙️</button>
+                        <button class="ctrl-btn" @mousedown.stop @click.stop="openHistory"   title="聊天记录">📋</button>
+                        <button class="ctrl-btn" @mousedown.stop @click.stop                  title="音量">🔊</button>
+                        <button class="ctrl-btn" @mousedown.stop @click.stop="toggleInput"   title="输入">💬</button>
                     </div>
                 </transition>
 
@@ -1058,13 +224,13 @@
 
 <style scoped>
     .mascot-root {
-        --clr-bubble-bg: rgba(255, 255, 255, 0.93);
-        --clr-bubble-bd: rgba(200, 190, 220, 0.65);
-        --clr-panel-bg: rgba(248, 245, 255, 0.96);
-        --clr-accent: #b39ddb;
+        --clr-bubble-bg:   rgba(255, 255, 255, 0.93);
+        --clr-bubble-bd:   rgba(200, 190, 220, 0.65);
+        --clr-panel-bg:    rgba(248, 245, 255, 0.96);
+        --clr-accent:      #b39ddb;
         --clr-accent-dark: #7e57c2;
-        --clr-text: #3d3450;
-        --clr-text-soft: #8878a8;
+        --clr-text:        #3d3450;
+        --clr-text-soft:   #8878a8;
         width: 100vw;
         height: 100vh;
         background: transparent;
@@ -1087,7 +253,7 @@
     /* ── 角色区 ───────────────────────────────────────────────── */
     .mascot-area {
         position: relative;
-        width: var(--mascot-w, 280px);
+        width:  var(--mascot-w, 280px);
         height: var(--mascot-h, 380px);
         flex-shrink: 0;
         display: flex;
@@ -1097,17 +263,10 @@
         cursor: grab;
     }
 
-        .mascot-area:active {
-            cursor: grabbing;
-        }
+        .mascot-area:active { cursor: grabbing; }
 
-        .mascot-area.locked {
-            cursor: default;
-        }
-
-        .mascot-area.locked:active {
-            cursor: default;
-        }
+        .mascot-area.locked       { cursor: default; }
+        .mascot-area.locked:active { cursor: default; }
 
     /* ── Live2D 画布 ──────────────────────────────────────────── */
     .live2d-canvas {
@@ -1119,7 +278,7 @@
         will-change: transform;
     }
 
-    /* ── 占位剪影（Live2D 未就绪时显示） ─────────────────────── */
+    /* ── 占位剪影 ─────────────────────────────────────────────── */
     .mascot-silhouette {
         position: absolute;
         bottom: 12px;
@@ -1132,14 +291,14 @@
     }
 
     .sil-head {
-        width: 60px;
+        width:  60px;
         height: 60px;
         border-radius: 50%;
         background: var(--clr-accent-dark);
     }
 
     .sil-body {
-        width: 90px;
+        width:  90px;
         height: 140px;
         border-radius: 45px 45px 22px 22px;
         background: var(--clr-accent-dark);
@@ -1149,8 +308,8 @@
     .status-dot {
         position: absolute;
         bottom: 6px;
-        right: 8px;
-        width: 7px;
+        right:  8px;
+        width:  7px;
         height: 7px;
         border-radius: 50%;
         background: #ccc;
@@ -1159,9 +318,7 @@
         z-index: 10;
     }
 
-        .status-dot.connected {
-            background: #81c784;
-        }
+        .status-dot.connected { background: #81c784; }
 
     /* ── 控制栏 ───────────────────────────────────────────────── */
     .controls-bar {
@@ -1176,7 +333,7 @@
     }
 
     .ctrl-btn {
-        width: 30px;
+        width:  30px;
         height: 30px;
         border: 1.5px solid var(--clr-bubble-bd);
         border-radius: 50%;
@@ -1192,53 +349,22 @@
         box-shadow: 0 2px 8px rgba(126, 87, 194, 0.15);
     }
 
-        .ctrl-btn:hover {
-            background: var(--clr-accent);
-            transform: scale(1.1);
-        }
+        .ctrl-btn:hover { background: var(--clr-accent); transform: scale(1.1); }
 
-    .controls-enter-active .ctrl-btn:nth-child(1) {
-        animation: slideIn 0.2s ease forwards;
-    }
+    /* 控制栏按钮逐一错开入场动画 */
+    .controls-enter-active .ctrl-btn:nth-child(1) { animation: slideIn 0.2s ease forwards; }
+    .controls-enter-active .ctrl-btn:nth-child(2) { animation: slideIn 0.2s 0.06s ease forwards; }
+    .controls-enter-active .ctrl-btn:nth-child(3) { animation: slideIn 0.2s 0.12s ease forwards; }
+    .controls-enter-active .ctrl-btn:nth-child(4) { animation: slideIn 0.2s 0.18s ease forwards; }
+    .controls-enter-active .ctrl-btn:nth-child(5) { animation: slideIn 0.2s 0.24s ease forwards; }
 
-    .controls-enter-active .ctrl-btn:nth-child(2) {
-        animation: slideIn 0.2s 0.06s ease forwards;
-    }
-
-    .controls-enter-active .ctrl-btn:nth-child(3) {
-        animation: slideIn 0.2s 0.12s ease forwards;
-    }
-
-    .controls-enter-active .ctrl-btn:nth-child(4) {
-        animation: slideIn 0.2s 0.18s ease forwards;
-    }
-    
-    .controls-enter-active .ctrl-btn:nth-child(5) {
-        animation: slideIn 0.2s 0.24s ease forwards;
-    }
-
-    .controls-leave-active {
-        transition: opacity 0.15s ease;
-    }
-
-    .controls-enter-from {
-        opacity: 0;
-    }
-
-    .controls-leave-to {
-        opacity: 0;
-    }
+    .controls-leave-active { transition: opacity 0.15s ease; }
+    .controls-enter-from   { opacity: 0; }
+    .controls-leave-to     { opacity: 0; }
 
     @keyframes slideIn {
-        from {
-            opacity: 0;
-            transform: translateX(10px);
-        }
-
-        to {
-            opacity: 1;
-            transform: translateX(0);
-        }
+        from { opacity: 0; transform: translateX(10px); }
+        to   { opacity: 1; transform: translateX(0); }
     }
 
     /* ── 解锁按钮 ─────────────────────────────────────────────── */
@@ -1247,11 +373,11 @@
         left: 6px;
         top: 50%;
         transform: translateY(-50%);
-        width: 30px;
+        width:  30px;
         height: 30px;
-        border: 1.5px solid rgba(255,255,255,0.6);
+        border: 1.5px solid rgba(255, 255, 255, 0.6);
         border-radius: 50%;
-        background: rgba(0,0,0,0.45);
+        background: rgba(0, 0, 0, 0.45);
         backdrop-filter: blur(8px);
         cursor: pointer;
         font-size: 15px;
@@ -1262,29 +388,17 @@
         z-index: 30;
     }
 
-    .unlock-enter-active {
-        transition: opacity 0.3s ease, transform 0.3s ease;
-    }
-
-    .unlock-leave-active {
-        transition: opacity 0.2s ease;
-    }
-
-    .unlock-enter-from {
-        opacity: 0;
-        transform: translate(-50%, -40%);
-    }
-
-    .unlock-leave-to {
-        opacity: 0;
-    }
+    .unlock-enter-active { transition: opacity 0.3s ease, transform 0.3s ease; }
+    .unlock-leave-active { transition: opacity 0.2s ease; }
+    .unlock-enter-from   { opacity: 0; transform: translate(-50%, -40%); }
+    .unlock-leave-to     { opacity: 0; }
 
     /* ── 输入面板 ─────────────────────────────────────────────── */
     .input-panel {
         position: absolute;
-        right: var(--mascot-w, 280px);
+        right:  var(--mascot-w, 280px);
         bottom: 0;
-        width: var(--input-w, 240px);
+        width:  var(--input-w, 240px);
         height: var(--mascot-h, 380px);
         background: var(--clr-panel-bg);
         border: 1.5px solid var(--clr-bubble-bd);
@@ -1315,18 +429,9 @@
         transition: border-color 0.2s;
     }
 
-        .chat-input:focus {
-            border-color: var(--clr-accent-dark);
-        }
-
-        .chat-input:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
-
-        .chat-input::placeholder {
-            color: var(--clr-text-soft);
-        }
+        .chat-input:focus       { border-color: var(--clr-accent-dark); }
+        .chat-input:disabled    { opacity: 0.5; cursor: not-allowed; }
+        .chat-input::placeholder { color: var(--clr-text-soft); }
 
     .send-btn {
         align-self: flex-end;
@@ -1341,18 +446,9 @@
         transition: opacity 0.2s, transform 0.1s;
     }
 
-        .send-btn:hover:not(:disabled) {
-            opacity: 0.82;
-        }
-
-        .send-btn:active:not(:disabled) {
-            transform: scale(0.95);
-        }
-
-        .send-btn:disabled {
-            opacity: 0.38;
-            cursor: not-allowed;
-        }
+        .send-btn:hover:not(:disabled)  { opacity: 0.82; }
+        .send-btn:active:not(:disabled) { transform: scale(0.95); }
+        .send-btn:disabled              { opacity: 0.38; cursor: not-allowed; }
 
     /* ── 气泡 ─────────────────────────────────────────────────── */
     .speech-bubble {
@@ -1386,9 +482,9 @@
         right: 24px;
         width: 0;
         height: 0;
-        border-left: 7px solid transparent;
+        border-left:  7px solid transparent;
         border-right: 7px solid transparent;
-        border-top: 8px solid var(--clr-bubble-bg);
+        border-top:   8px solid var(--clr-bubble-bg);
     }
 
     .thinking-dots {
@@ -1398,66 +494,28 @@
     }
 
         .thinking-dots span {
-            width: 6px;
+            width:  6px;
             height: 6px;
             border-radius: 50%;
             background: var(--clr-accent);
             animation: bounce 1.2s infinite ease-in-out;
         }
 
-            .thinking-dots span:nth-child(2) {
-                animation-delay: 0.2s;
-            }
-
-            .thinking-dots span:nth-child(3) {
-                animation-delay: 0.4s;
-            }
+            .thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
+            .thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
 
     @keyframes bounce {
-        0%, 80%, 100% {
-            transform: translateY(0);
-            opacity: 0.4;
-        }
-
-        40% {
-            transform: translateY(-5px);
-            opacity: 1;
-        }
+        0%, 80%, 100% { transform: translateY(0);    opacity: 0.4; }
+        40%            { transform: translateY(-5px); opacity: 1; }
     }
 
-    .bubble-enter-active {
-        transition: opacity 0.25s ease, transform 0.22s ease;
-    }
+    .bubble-enter-active { transition: opacity 0.25s ease, transform 0.22s ease; }
+    .bubble-leave-active { transition: opacity 0.2s ease,  transform 0.18s ease; }
+    .bubble-enter-from   { opacity: 0; transform: translateY(8px); }
+    .bubble-leave-to     { opacity: 0; transform: translateY(-4px); }
 
-    .bubble-leave-active {
-        transition: opacity 0.2s ease, transform 0.18s ease;
-    }
-
-    .bubble-enter-from {
-        opacity: 0;
-        transform: translateY(8px);
-    }
-
-    .bubble-leave-to {
-        opacity: 0;
-        transform: translateY(-4px);
-    }
-
-    .panel-enter-active {
-        transition: opacity 0.2s ease, transform 0.2s ease;
-    }
-
-    .panel-leave-active {
-        transition: opacity 0.15s ease, transform 0.15s ease;
-    }
-
-    .panel-enter-from {
-        opacity: 0;
-        transform: translateX(-10px);
-    }
-
-    .panel-leave-to {
-        opacity: 0;
-        transform: translateX(-10px);
-    }
+    .panel-enter-active { transition: opacity 0.2s ease,  transform 0.2s ease; }
+    .panel-leave-active { transition: opacity 0.15s ease, transform 0.15s ease; }
+    .panel-enter-from   { opacity: 0; transform: translateX(-10px); }
+    .panel-leave-to     { opacity: 0; transform: translateX(-10px); }
 </style>
