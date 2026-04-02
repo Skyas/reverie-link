@@ -403,8 +403,10 @@ async def websocket_chat(websocket: WebSocket):
             session_messages.append(ai_timeline_msg)
             extractor.on_round_complete(session_messages)
 
+            # 发送原始 reply（含情绪标签），由前端 parseEmotion 负责剥离和解析。
+            # clean_reply 只用于存库和写入对话历史，不发往前端。
             await websocket.send_text(json.dumps(
-                {"type": "chat_response", "message": clean_reply},
+                {"type": "chat_response", "message": reply},
                 ensure_ascii=False,
             ))
 
