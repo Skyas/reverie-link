@@ -101,12 +101,14 @@ async fn open_history(app: tauri::AppHandle) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    println!("[Tauri] ⏱ run() 开始");
     let is_passthrough = Arc::new(Mutex::new(false));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(is_passthrough.clone())
         .setup(move |app| {
+            println!("[Tauri] ⏱ setup() 开始"); 
             // ── 托盘菜单 ──────────────────────────────────────
             let toggle_item = MenuItem::with_id(
                 app, "toggle_passthrough", "🔓 当前：可交互", true, None::<&str>,

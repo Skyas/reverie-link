@@ -12,6 +12,12 @@
  *   BASE_W / BASE_H — 来自 useSizePreset 的 ComputedRef，决定 canvas / PIXI 尺寸
  *
  * 不知道 TTS、WebSocket、窗口几何的存在。
+ *
+ * 性能说明：
+ *   Live2DModel.from() 在 WebView2 dev 模式下需要 7~8 秒（Cubism Core 初始化 +
+ *   WebGL 纹理创建的开销，与模型文件大小无关）。为避免阻塞窗口显示，initLive2D()
+ *   在创建完 PIXI Application 后立即返回，模型在后台异步加载。Ticker 渲染受
+ *   live2dReady 守卫保护，模型就绪前不渲染 live2dContainer，避免空容器闪烁。
  */
 
 import { ref, type Ref, type ComputedRef } from "vue";
@@ -297,12 +303,40 @@ export function useLive2D(
         } catch { /* ignore */ }
     }
 
+    // ── 内部辅助：后台加载模型 ───────────────────────────────────────
+    /**
+     * 异步加载 Live2D 模型到已就绪的 PIXI 容器中。
+     * 由 initLive2D() 以 fire-and-forget 方式调用（不 await），
+     * 使窗口可以立即显示占位剪影，模型加载完成后自然出现。
+     *
+     * Ticker 渲染受 live2dReady 守卫保护：
+     * 模型就绪前 → Ticker 只 clear renderTexture（透明画布，剪影可见）
+     * 模型就绪后 → Ticker 正常渲染 live2dContainer
+     */
+    async function loadModel() {
+        try {
+            const modelPath = localStorage.getItem("rl-model-path") ?? "live2d/MO/MO.model3.json";
+            live2dModel = await Live2DModel.from("/" + modelPath, { autoInteract: false });
+            mountModel(live2dModel, modelPath, BASE_W.value);
+            await setupFrameSwitchProtection(live2dModel, modelPath);
+            // 一切就绪后才设为 true，Ticker 才开始渲染模型
+            live2dReady.value = true;
+        } catch (e) {
+            console.error("[Live2D] 模型加载失败:", e);
+            live2dError.value = true;
+        }
+    }
+
     // ── 核心 API ──────────────────────────────────────────────────────
     /**
-     * 初始化 PIXI + Live2D 模型。
+     * 初始化 PIXI Application + RenderTexture + Ticker，然后立即返回。
+     * 模型加载（Live2DModel.from()，WebView2 dev 下约 7~8 秒）在后台异步进行。
+     *
+     * 用户体验：窗口瞬间出现（占位剪影可见） → 数秒后模型淡入替换剪影。
+     *
      * ⚠️  需要 public/live2dcubismcore.min.js 已加载（见 index.html）。
      */
-    async function initLive2D() {
+    function initLive2D() {
         if (!canvasRef.value) return;
 
         if (typeof (window as any).Live2DCubismCore === "undefined") {
@@ -335,22 +369,14 @@ export function useLive2D(
         pixiApp.stage.addChild(sprite);
         live2dContainer = new PIXI.Container();
 
-        try {
-            const modelPath = localStorage.getItem("rl-model-path") ?? "live2d/MO/MO.model3.json";
-            live2dModel = await Live2DModel.from("/" + modelPath, { autoInteract: false });
-            mountModel(live2dModel, modelPath, w);
-            setupFrameSwitchProtection(live2dModel, modelPath);
-        } catch (e) {
-            console.error("[Live2D] 模型加载失败:", e);
-            live2dError.value = true;
-            return;
-        }
-
-        // 第二层保护：Ticker 离屏渲染（DWM 永远只看前缓冲的完整帧）
+        // Ticker：渲染受 live2dReady 守卫保护
+        // - 模型加载中 → 跳过渲染（renderTexture 保持透明，占位剪影可见，无闪烁）
+        // - 模型就绪后 → 正常渲染 live2dContainer（含 stepped 参数二值化后备）
         pixiApp.ticker.add(() => {
-            // ticker 层 stepped 参数二值化（作为 coreModel hook 失败时的后备）
-            // steppedParamIds 为空时直接跳过，零开销
-            if (steppedParamIds.length > 0 && live2dModel && live2dReady.value) {
+            if (!live2dReady.value) return;
+
+            // stepped 参数二值化（作为 coreModel hook 失败时的后备）
+            if (steppedParamIds.length > 0 && live2dModel) {
                 try {
                     const core = live2dModel.internalModel.coreModel;
                     const ids  = core._model.parameters.ids;
@@ -364,7 +390,9 @@ export function useLive2D(
             renderer.render(live2dContainer!, { renderTexture: renderTexture!, clear: true });
         });
 
-        live2dReady.value = true;
+        // 模型加载在后台进行，不阻塞 initLive2D 返回
+        // live2dReady 会在 loadModel 完成后变为 true，Ticker 届时开始渲染模型
+        loadModel();
     }
 
     /** 销毁 PIXI 实例（onUnmounted 调用） */
@@ -388,7 +416,7 @@ export function useLive2D(
         localStorage.setItem("rl-model-path", newPath);
 
         if (!pixiApp || !live2dContainer) {
-            await initLive2D();
+            initLive2D();
             return;
         }
 
@@ -404,7 +432,7 @@ export function useLive2D(
         try {
             live2dModel = await Live2DModel.from("/" + newPath, { autoInteract: false });
             mountModel(live2dModel, newPath, BASE_W.value);
-            setupFrameSwitchProtection(live2dModel, newPath);
+            await setupFrameSwitchProtection(live2dModel, newPath);
             live2dReady.value = true;
             console.info(`[Live2D] 模型切换成功 ✓  (${newPath})`);
         } catch (e) {

@@ -7,6 +7,7 @@ Reverie Link · 视觉感知主动发言处理器
 
 import asyncio
 import json
+import logging
 import re
 
 from fastapi.websockets import WebSocket
@@ -17,8 +18,10 @@ from memory import (
     TimelineMessage,
     save_message,
 )
+from memory.vector_store import retrieve_relevant_summaries
 from prompt_builder import build_vision_speech_messages
 
+logger = logging.getLogger(__name__)
 
 # 最近发言记录（模块级，防止主动发言重复）
 _recent_vision_speeches: list = []
@@ -36,10 +39,13 @@ async def _drain_vision_speech(
     speech_queue: asyncio.Queue,
     window_index: int = 1,
     character_name: str = "",
+    character: dict = None,
 ) -> None:
     """
     检查并处理视觉感知主动发言队列中的待发事件。
     每次最多处理 1 条，避免连续刷屏。
+
+    新增：主动发言时执行向量检索，让桌宠能聊起过去的记忆。
     """
     global _recent_vision_speeches
 
@@ -51,6 +57,41 @@ async def _drain_vision_speech(
     if trigger.get("session_id") and trigger["session_id"] != session_id:
         return
 
+    # ── 向量检索：用最近的画面描述 + 场景信息作为 query ──────────
+    relevant_summaries = []
+    if session_character_id:
+        scene_info = trigger.get("scene_info", {})
+        # 构造检索 query：画面描述 + 游戏名（如果有）
+        query_parts = []
+        scene_desc = scene_info.get("scene_description", "")
+        if scene_desc:
+            query_parts.append(scene_desc)
+        game_name = scene_info.get("game_name")
+        if game_name:
+            query_parts.append(game_name)
+        # 如果画面没什么信息，用最近一条对话内容作为 query
+        if not query_parts and history:
+            for msg in reversed(list(history)):
+                if msg.get("role") == "user" and msg.get("content"):
+                    query_parts.append(msg["content"])
+                    break
+        if query_parts:
+            query = " ".join(query_parts)
+            try:
+                relevant_summaries = retrieve_relevant_summaries(
+                    query=query,
+                    character_id=session_character_id,
+                    top_k=3,
+                )
+                if relevant_summaries:
+                    logger.info(f"[Vision] 主动发言向量检索召回 {len(relevant_summaries)} 条摘要")
+            except Exception as e:
+                logger.warning(f"[Vision] 主动发言向量检索失败: {e}")
+
+    # ── 补充 address 到 trigger（供方向引导模板使用）──────────────
+    if character and "address" not in trigger:
+        trigger["address"] = character.get("address", "用户")
+
     try:
         messages = build_vision_speech_messages(
             system_prompt,
@@ -60,6 +101,7 @@ async def _drain_vision_speech(
             window_index=window_index,
             character_id=session_character_id,
             character_name=character_name,
+            relevant_summaries=relevant_summaries,
         )
         try:
             response = await llm_client.chat.completions.create(
@@ -72,9 +114,9 @@ async def _drain_vision_speech(
                 max_tokens=200, temperature=0.9,
             )
         reply = response.choices[0].message.content.strip()
-        print(f"[Vision] LLM回复（finish_reason={response.choices[0].finish_reason}）: {reply[:50]}")
+        logger.info(f"[Vision] LLM回复（finish_reason={response.choices[0].finish_reason}）: {reply[:50]}")
     except Exception as e:
-        print(f"[Vision] 主动发言 LLM 调用失败: {e}")
+        logger.error(f"[Vision] 主动发言 LLM 调用失败: {e}")
         return
 
     emotion = _extract_emotion(reply)

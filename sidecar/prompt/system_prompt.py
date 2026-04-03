@@ -2,9 +2,10 @@
 prompt/system_prompt.py — System Prompt 组装
 
 包含：
-  build_system_prompt()   — Layer 1 角色定义组装
+  build_system_prompt()   — Layer 1 角色定义组装（不含硬性约束，约束在拼接末尾统一追加）
   _build_memory_layer()   — Layer 2 记忆注入（笔记本 + 向量摘要）
   _build_time_note()      — 当前时间字符串
+  _HARD_CONSTRAINT        — 硬性约束文本（供 _build_full_system 追加到最末尾）
 """
 
 import sys
@@ -17,11 +18,19 @@ if _SIDECAR_DIR not in sys.path:
     sys.path.insert(0, _SIDECAR_DIR)
 
 
+# ── 硬性约束（独立常量，由 _build_full_system 追加到最末尾）─────────────────
+# 放在末尾的理由：Gemini 等模型对长 system prompt 有 recency bias，
+# 末尾内容注意力最强，硬性约束放这里最有效。
+_HARD_CONSTRAINT = (
+    "【重要限制】语音对话场景，用极简短口语回复，禁超50字（情绪标签不计）。"
+    "只输出角色的话，禁止说明、动作描述、思考过程。"
+)
+
+
 def build_system_prompt(character: dict) -> str:
     """
     Layer 1：将角色模板字段组装为 System Prompt。
-    Layer 2（记忆注入）在 build_messages / build_vision_speech_messages 中拼接，
-    此处仅返回纯角色定义部分，便于测试与复用。
+    注意：硬性约束不在此处追加，由 _build_full_system() 统一放到最末尾。
     """
     name        = character.get("name", "Assistant")
     identity    = character.get("identity", "")
@@ -30,10 +39,10 @@ def build_system_prompt(character: dict) -> str:
     style       = character.get("style", "")
     examples    = character.get("examples", [])
 
-    prompt_parts = []
+    parts = []
 
     # ── 角色核心定义 ──────────────────────────────────────────────
-    prompt_parts.append(
+    parts.append(
         f"你现在扮演「{name}」，{identity}。\n"
         f"性格：{personality}\n"
         f"称呼用户为：{address}\n"
@@ -42,37 +51,26 @@ def build_system_prompt(character: dict) -> str:
 
     # ── 对话示例（few-shot，仅在用户填写时注入）──────────────────
     if examples:
-        prompt_parts.append("\n【对话示例】")
+        parts.append("\n【对话示例】")
         for ex in examples:
-            prompt_parts.append(
+            parts.append(
                 f"{address}：{ex.get('user', '')}\n"
                 f"{name}：{ex.get('char', '')}"
             )
 
-    # ── 情感表达规则 ──────────────────────────────────────────────
-    prompt_parts.append(
-        "\n【情感表达】根据当前回复的情感，在回复句末加入且仅加入一个情绪标签，"
-        "从以下选项中选择最贴切的一个：\n"
-        "[happy]开心高兴 / [sad]难过伤心 / [angry]生气不满 / "
-        "[shy]害羞脸红 / [surprised]惊讶吃惊 / [sigh]叹气无奈 / [neutral]平静默认\n"
-        "严格只使用以上7个标签，不要自创其他标签。\n"
-        "例如：「哼，谁要你说这种话。[angry]」"
+    # ── 情感表达规则（精简版）─────────────────────────────────────
+    parts.append(
+        "\n【情感表达】在回复句末加一个情绪标签：\n"
+        "[happy] / [sad] / [angry] / [shy] / [surprised] / [sigh] / [neutral]\n"
+        "严格只用以上7个，不要自创。"
     )
 
-    # ── 截屏意图识别指令（Phase 3 视觉感知）──────────────────────
-    prompt_parts.append(
-        "\n【屏幕观察】当你判断用户希望你观察屏幕画面时，"
-        "在回复的最开头输出 [NEED_SCREENSHOT] 标签（仅此一个标签，无需其他解释）。"
+    # ── 截屏意图识别（Phase 3 视觉感知）──────────────────────────
+    parts.append(
+        "\n【屏幕观察】若判断用户想让你看屏幕，回复开头输出 [NEED_SCREENSHOT]。"
     )
 
-    # ── 硬性约束（始终在最后，防止被覆盖）──────────────────────
-    prompt_parts.append(
-        "\n【重要限制】这是一段语音对话场景。"
-        "请用极其简短、口语化的句子回复，严禁超过50个字（情绪标签不计入字数）。"
-        "只输出角色说的话，不要输出任何说明、括号内的动作描述或思考过程。"
-    )
-
-    return "\n".join(prompt_parts)
+    return "\n".join(parts)
 
 
 def _build_memory_layer(

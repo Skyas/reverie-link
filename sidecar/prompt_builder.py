@@ -1,8 +1,8 @@
 """
-prompt_builder.py — 纯 re-export 入口（约 20 行）
+prompt_builder.py — 纯 re-export 入口
 
 所有实现已迁移至 sidecar/prompt/ 子包：
-  prompt/constants.py     — 常量与短语池
+  prompt/constants.py     — 常量
   prompt/system_prompt.py — 角色定义 + 记忆层 + 时间注入
   prompt/messages.py      — 所有 messages 列表组装函数
 
