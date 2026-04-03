@@ -3,14 +3,15 @@
     import { listen } from "@tauri-apps/api/event";
     import { invoke } from "@tauri-apps/api/core";
 
-    import { useSizePreset }    from "./composables/useSizePreset";
-    import { useLive2D }        from "./composables/useLive2D";
-    import { useTTS }           from "./composables/useTTS";
-    import { useWebSocket }     from "./composables/useWebSocket";
+    import { useSizePreset } from "./composables/useSizePreset";
+    import { useLive2D } from "./composables/useLive2D";
+    import { useTTS } from "./composables/useTTS";
+    import { useWebSocket } from "./composables/useWebSocket";
     import { useWindowManager } from "./composables/useWindowManager";
 
     // ── 1. 尺寸系统（跨模块共享的唯一数据源） ────────────────────────────
-    const { sizeConfig, BASE_W, BASE_H, INPUT_W, BUBBLE_H } = useSizePreset();
+    // [FIX] 额外解构 sizePreset，用于响应 config-changed 中的尺寸切换
+    const { sizePreset, sizeConfig, BASE_W, BASE_H, INPUT_W, BUBBLE_H } = useSizePreset();
 
     // ── 2. Live2D（表情 + 口型驱动，对其他模块无感知） ───────────────────
     const canvasRef = ref<HTMLCanvasElement | null>(null);
@@ -61,8 +62,8 @@
     function handleSend() {
         const msg = userInput.value.trim();
         if (!msg || !isConnected.value || isThinking.value) return;
-        showBubble.value  = false;  // 立即隐藏旧气泡
-        userInput.value   = "";
+        showBubble.value = false;  // 立即隐藏旧气泡
+        userInput.value = "";
         sendMessage(msg);           // 内部设置 isThinking = true 并发送
     }
 
@@ -75,7 +76,7 @@
 
     // ── 便捷窗口操作（保持在 App.vue 层，逻辑极简不值得单独 composable） ─
     async function openSettings() { await invoke("open_settings"); }
-    async function openHistory()  { await invoke("open_history"); }
+    async function openHistory() { await invoke("open_history"); }
 
     // ── 生命周期 ──────────────────────────────────────────────────────
     const unlisten: (() => void)[] = [];
@@ -116,6 +117,43 @@
 
         unlisten.push(...unlisteners);
         console.timeEnd("[⏱ onMounted 总耗时]");
+        // Tauri 事件监听
+        unlisten.push(await listen("config-changed", (e) => {
+            const payload = e.payload as {
+                llm?: object;
+                character?: object;
+                memory_window?: number;
+                character_id?: string;
+                vision?: object;
+                // [FIX] 新增尺寸预设字段，由 SettingsApp.vue 在保存时填入
+                size_preset?: "small" | "medium" | "large";
+            };
+
+            // [FIX] 尺寸切换：直接更新 sizePreset ref，
+            // BASE_W/INPUT_W 等 computed 会自动联动，
+            // useWindowManager 内部的 watch(BASE_W) 会触发 resizeToFit()
+            if (payload.size_preset) {
+                sizePreset.value = payload.size_preset;
+            }
+
+            sendConfigure(payload);
+        }));
+
+        unlisten.push(await listen("mascot-hover", (e) => {
+            showUnlock.value = e.payload as boolean;
+        }));
+
+        unlisten.push(await listen("open-settings", async () => {
+            await invoke("open_settings");
+        }));
+
+        unlisten.push(await listen("model-changed", async (e) => {
+            const path = (e.payload as { path: string }).path;
+            await reloadLive2D(path);
+        }));
+
+        // Live2D 初始化（最后执行，不阻塞上方逻辑）
+        await initLive2D();
     });
 
     onUnmounted(() => {
@@ -129,8 +167,10 @@
 <template>
     <div class="mascot-root"
          :style="{
-             '--mascot-w': sizeConfig.baseW + 'px',
-             '--mascot-h': sizeConfig.baseH + 'px',
+             '--mascot-w': sizeConfig.baseW  + 'px',
+             '--mascot-h': sizeConfig.baseH  + 'px',
+             '--input-w':  sizeConfig.inputW  + 'px',
+             '--bubble-h': sizeConfig.bubbleH + 'px',
          }">
 
         <!-- 气泡 -->
@@ -184,11 +224,11 @@
                 <!-- 控制栏（未锁定时悬停显示） -->
                 <transition name="controls">
                     <div v-if="showControls && !isLocked" class="controls-bar">
-                        <button class="ctrl-btn" @mousedown.stop @click.stop="toggleLock"    title="锁定">🔓</button>
-                        <button class="ctrl-btn" @mousedown.stop @click.stop="openSettings"  title="设置">⚙️</button>
-                        <button class="ctrl-btn" @mousedown.stop @click.stop="openHistory"   title="聊天记录">📋</button>
-                        <button class="ctrl-btn" @mousedown.stop @click.stop                  title="音量">🔊</button>
-                        <button class="ctrl-btn" @mousedown.stop @click.stop="toggleInput"   title="输入">💬</button>
+                        <button class="ctrl-btn" @mousedown.stop @click.stop="toggleLock" title="锁定">🔓</button>
+                        <button class="ctrl-btn" @mousedown.stop @click.stop="openSettings" title="设置">⚙️</button>
+                        <button class="ctrl-btn" @mousedown.stop @click.stop="openHistory" title="聊天记录">📋</button>
+                        <button class="ctrl-btn" @mousedown.stop @click.stop title="音量">🔊</button>
+                        <button class="ctrl-btn" @mousedown.stop @click.stop="toggleInput" title="输入">💬</button>
                     </div>
                 </transition>
 
@@ -226,13 +266,13 @@
 
 <style scoped>
     .mascot-root {
-        --clr-bubble-bg:   rgba(255, 255, 255, 0.93);
-        --clr-bubble-bd:   rgba(200, 190, 220, 0.65);
-        --clr-panel-bg:    rgba(248, 245, 255, 0.96);
-        --clr-accent:      #b39ddb;
+        --clr-bubble-bg: rgba(255, 255, 255, 0.93);
+        --clr-bubble-bd: rgba(200, 190, 220, 0.65);
+        --clr-panel-bg: rgba(248, 245, 255, 0.96);
+        --clr-accent: #b39ddb;
         --clr-accent-dark: #7e57c2;
-        --clr-text:        #3d3450;
-        --clr-text-soft:   #8878a8;
+        --clr-text: #3d3450;
+        --clr-text-soft: #8878a8;
         width: 100vw;
         height: 100vh;
         background: transparent;
@@ -255,7 +295,7 @@
     /* ── 角色区 ───────────────────────────────────────────────── */
     .mascot-area {
         position: relative;
-        width:  var(--mascot-w, 280px);
+        width: var(--mascot-w, 280px);
         height: var(--mascot-h, 380px);
         flex-shrink: 0;
         display: flex;
@@ -265,10 +305,17 @@
         cursor: grab;
     }
 
-        .mascot-area:active { cursor: grabbing; }
+        .mascot-area:active {
+            cursor: grabbing;
+        }
 
-        .mascot-area.locked       { cursor: default; }
-        .mascot-area.locked:active { cursor: default; }
+        .mascot-area.locked {
+            cursor: default;
+        }
+
+            .mascot-area.locked:active {
+                cursor: default;
+            }
 
     /* ── Live2D 画布 ──────────────────────────────────────────── */
     .live2d-canvas {
@@ -293,14 +340,14 @@
     }
 
     .sil-head {
-        width:  60px;
+        width: 60px;
         height: 60px;
         border-radius: 50%;
         background: var(--clr-accent-dark);
     }
 
     .sil-body {
-        width:  90px;
+        width: 90px;
         height: 140px;
         border-radius: 45px 45px 22px 22px;
         background: var(--clr-accent-dark);
@@ -310,8 +357,8 @@
     .status-dot {
         position: absolute;
         bottom: 6px;
-        right:  8px;
-        width:  7px;
+        right: 8px;
+        width: 7px;
         height: 7px;
         border-radius: 50%;
         background: #ccc;
@@ -320,7 +367,9 @@
         z-index: 10;
     }
 
-        .status-dot.connected { background: #81c784; }
+        .status-dot.connected {
+            background: #81c784;
+        }
 
     /* ── 控制栏 ───────────────────────────────────────────────── */
     .controls-bar {
@@ -335,7 +384,7 @@
     }
 
     .ctrl-btn {
-        width:  30px;
+        width: 30px;
         height: 30px;
         border: 1.5px solid var(--clr-bubble-bd);
         border-radius: 50%;
@@ -351,22 +400,54 @@
         box-shadow: 0 2px 8px rgba(126, 87, 194, 0.15);
     }
 
-        .ctrl-btn:hover { background: var(--clr-accent); transform: scale(1.1); }
+        .ctrl-btn:hover {
+            background: var(--clr-accent);
+            transform: scale(1.1);
+        }
 
     /* 控制栏按钮逐一错开入场动画 */
-    .controls-enter-active .ctrl-btn:nth-child(1) { animation: slideIn 0.2s ease forwards; }
-    .controls-enter-active .ctrl-btn:nth-child(2) { animation: slideIn 0.2s 0.06s ease forwards; }
-    .controls-enter-active .ctrl-btn:nth-child(3) { animation: slideIn 0.2s 0.12s ease forwards; }
-    .controls-enter-active .ctrl-btn:nth-child(4) { animation: slideIn 0.2s 0.18s ease forwards; }
-    .controls-enter-active .ctrl-btn:nth-child(5) { animation: slideIn 0.2s 0.24s ease forwards; }
+    .controls-enter-active .ctrl-btn:nth-child(1) {
+        animation: slideIn 0.2s ease forwards;
+    }
 
-    .controls-leave-active { transition: opacity 0.15s ease; }
-    .controls-enter-from   { opacity: 0; }
-    .controls-leave-to     { opacity: 0; }
+    .controls-enter-active .ctrl-btn:nth-child(2) {
+        animation: slideIn 0.2s 0.06s ease forwards;
+    }
+
+    .controls-enter-active .ctrl-btn:nth-child(3) {
+        animation: slideIn 0.2s 0.12s ease forwards;
+    }
+
+    .controls-enter-active .ctrl-btn:nth-child(4) {
+        animation: slideIn 0.2s 0.18s ease forwards;
+    }
+
+    .controls-enter-active .ctrl-btn:nth-child(5) {
+        animation: slideIn 0.2s 0.24s ease forwards;
+    }
+
+    .controls-leave-active {
+        transition: opacity 0.15s ease;
+    }
+
+    .controls-enter-from {
+        opacity: 0;
+    }
+
+    .controls-leave-to {
+        opacity: 0;
+    }
 
     @keyframes slideIn {
-        from { opacity: 0; transform: translateX(10px); }
-        to   { opacity: 1; transform: translateX(0); }
+        from {
+            opacity: 0;
+            transform: translateX(10px);
+        }
+
+        to {
+            opacity: 1;
+            transform: translateX(0);
+        }
     }
 
     /* ── 解锁按钮 ─────────────────────────────────────────────── */
@@ -375,7 +456,7 @@
         left: 6px;
         top: 50%;
         transform: translateY(-50%);
-        width:  30px;
+        width: 30px;
         height: 30px;
         border: 1.5px solid rgba(255, 255, 255, 0.6);
         border-radius: 50%;
@@ -390,17 +471,29 @@
         z-index: 30;
     }
 
-    .unlock-enter-active { transition: opacity 0.3s ease, transform 0.3s ease; }
-    .unlock-leave-active { transition: opacity 0.2s ease; }
-    .unlock-enter-from   { opacity: 0; transform: translate(-50%, -40%); }
-    .unlock-leave-to     { opacity: 0; }
+    .unlock-enter-active {
+        transition: opacity 0.3s ease, transform 0.3s ease;
+    }
+
+    .unlock-leave-active {
+        transition: opacity 0.2s ease;
+    }
+
+    .unlock-enter-from {
+        opacity: 0;
+        transform: translate(-50%, -40%);
+    }
+
+    .unlock-leave-to {
+        opacity: 0;
+    }
 
     /* ── 输入面板 ─────────────────────────────────────────────── */
     .input-panel {
         position: absolute;
-        right:  var(--mascot-w, 280px);
+        right: var(--mascot-w, 280px);
         bottom: 0;
-        width:  var(--input-w, 240px);
+        width: var(--input-w, 240px);
         height: var(--mascot-h, 380px);
         background: var(--clr-panel-bg);
         border: 1.5px solid var(--clr-bubble-bd);
@@ -431,9 +524,18 @@
         transition: border-color 0.2s;
     }
 
-        .chat-input:focus       { border-color: var(--clr-accent-dark); }
-        .chat-input:disabled    { opacity: 0.5; cursor: not-allowed; }
-        .chat-input::placeholder { color: var(--clr-text-soft); }
+        .chat-input:focus {
+            border-color: var(--clr-accent-dark);
+        }
+
+        .chat-input:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .chat-input::placeholder {
+            color: var(--clr-text-soft);
+        }
 
     .send-btn {
         align-self: flex-end;
@@ -448,9 +550,18 @@
         transition: opacity 0.2s, transform 0.1s;
     }
 
-        .send-btn:hover:not(:disabled)  { opacity: 0.82; }
-        .send-btn:active:not(:disabled) { transform: scale(0.95); }
-        .send-btn:disabled              { opacity: 0.38; cursor: not-allowed; }
+        .send-btn:hover:not(:disabled) {
+            opacity: 0.82;
+        }
+
+        .send-btn:active:not(:disabled) {
+            transform: scale(0.95);
+        }
+
+        .send-btn:disabled {
+            opacity: 0.38;
+            cursor: not-allowed;
+        }
 
     /* ── 气泡 ─────────────────────────────────────────────────── */
     .speech-bubble {
@@ -484,9 +595,9 @@
         right: 24px;
         width: 0;
         height: 0;
-        border-left:  7px solid transparent;
+        border-left: 7px solid transparent;
         border-right: 7px solid transparent;
-        border-top:   8px solid var(--clr-bubble-bg);
+        border-top: 8px solid var(--clr-bubble-bg);
     }
 
     .thinking-dots {
@@ -496,28 +607,66 @@
     }
 
         .thinking-dots span {
-            width:  6px;
+            width: 6px;
             height: 6px;
             border-radius: 50%;
             background: var(--clr-accent);
             animation: bounce 1.2s infinite ease-in-out;
         }
 
-            .thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
-            .thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
+            .thinking-dots span:nth-child(2) {
+                animation-delay: 0.2s;
+            }
+
+            .thinking-dots span:nth-child(3) {
+                animation-delay: 0.4s;
+            }
 
     @keyframes bounce {
-        0%, 80%, 100% { transform: translateY(0);    opacity: 0.4; }
-        40%            { transform: translateY(-5px); opacity: 1; }
+        0%, 80%, 100% {
+            transform: translateY(0);
+            opacity: 0.4;
+        }
+
+        40% {
+            transform: translateY(-5px);
+            opacity: 1;
+        }
     }
 
-    .bubble-enter-active { transition: opacity 0.25s ease, transform 0.22s ease; }
-    .bubble-leave-active { transition: opacity 0.2s ease,  transform 0.18s ease; }
-    .bubble-enter-from   { opacity: 0; transform: translateY(8px); }
-    .bubble-leave-to     { opacity: 0; transform: translateY(-4px); }
+    .bubble-enter-active {
+        transition: opacity 0.25s ease, transform 0.22s ease;
+    }
 
-    .panel-enter-active { transition: opacity 0.2s ease,  transform 0.2s ease; }
-    .panel-leave-active { transition: opacity 0.15s ease, transform 0.15s ease; }
-    .panel-enter-from   { opacity: 0; transform: translateX(-10px); }
-    .panel-leave-to     { opacity: 0; transform: translateX(-10px); }
+    .bubble-leave-active {
+        transition: opacity 0.2s ease, transform 0.18s ease;
+    }
+
+    .bubble-enter-from {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+
+    .bubble-leave-to {
+        opacity: 0;
+        transform: translateY(-4px);
+    }
+
+    .panel-enter-active {
+        transition: opacity 0.2s ease, transform 0.2s ease;
+    }
+
+    .panel-leave-active {
+        transition: opacity 0.15s ease, transform 0.15s ease;
+    }
+
+    .panel-enter-from {
+        opacity: 0;
+        transform: translateX(-10px);
+    }
+
+    .panel-leave-to {
+        opacity: 0;
+        transform: translateX(-10px);
+    }
 </style>

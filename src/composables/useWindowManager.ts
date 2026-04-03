@@ -29,23 +29,23 @@ import { invoke } from "@tauri-apps/api/core";
 
 interface WindowManagerDeps {
     isThinking: Ref<boolean>;
-    BASE_W:     ComputedRef<number>;
-    BASE_H:     ComputedRef<number>;
-    INPUT_W:    ComputedRef<number>;
-    BUBBLE_H:   ComputedRef<number>;
+    BASE_W: ComputedRef<number>;
+    BASE_H: ComputedRef<number>;
+    INPUT_W: ComputedRef<number>;
+    BUBBLE_H: ComputedRef<number>;
 }
 
 export function useWindowManager(deps: WindowManagerDeps) {
     const { isThinking, BASE_W, BASE_H, INPUT_W, BUBBLE_H } = deps;
 
     // ── UI 状态 ───────────────────────────────────────────────────────
-    const inputOpen    = ref(false);
-    const userInput    = ref("");
-    const bubbleText   = ref("");
-    const showBubble   = ref(false);
-    const isLocked     = ref(false);
+    const inputOpen = ref(false);
+    const userInput = ref("");
+    const bubbleText = ref("");
+    const showBubble = ref(false);
+    const isLocked = ref(false);
     const showControls = ref(false);
-    const showUnlock   = ref(false);
+    const showUnlock = ref(false);
 
     const inputRef = ref<HTMLTextAreaElement | null>(null);
 
@@ -96,13 +96,13 @@ export function useWindowManager(deps: WindowManagerDeps) {
         isLocked.value = newState;
         if (newState) {
             showControls.value = false;
-            inputOpen.value    = false;
+            inputOpen.value = false;
         }
     }
 
     async function unlockFromButton() {
         const newState = await invoke<boolean>("toggle_lock");
-        isLocked.value   = newState;
+        isLocked.value = newState;
         showUnlock.value = false;
     }
 
@@ -118,7 +118,7 @@ export function useWindowManager(deps: WindowManagerDeps) {
         const win = getCurrentWindow();
         const pos = await win.outerPosition();
         const siz = await win.outerSize();
-        const sf  = (await primaryMonitor())?.scaleFactor ?? 1;
+        const sf = (await primaryMonitor())?.scaleFactor ?? 1;
 
         const anchorX = pos.x + siz.width;
         const anchorY = pos.y + siz.height;
@@ -133,15 +133,18 @@ export function useWindowManager(deps: WindowManagerDeps) {
         await win.setPosition(new PhysicalPosition(anchorX - newPhysW, anchorY - newPhysH));
     }
 
-    // isThinking 来自外部注入，不持有 WebSocket 的引用，仅消费 ref 值
-    watch([inputOpen, showBubble, isThinking], resizeToFit);
+    // [FIX] 额外监听 BASE_W：当用户在设置中切换尺寸档位时，
+    // sizePreset.value 更新 → BASE_W computed 重算 → 此处 watch 触发 → 窗口立即 resize。
+    // 无需重启即可生效。BASE_W 已足够代表整套尺寸变化（BASE_H / INPUT_W / BUBBLE_H
+    // 均与 BASE_W 同步变化，无需重复监听）。
+    watch([inputOpen, showBubble, isThinking, BASE_W], resizeToFit);
 
     // ── 初始位置恢复 ──────────────────────────────────────────────────
     async function initWindowPosition() {
         const win = getCurrentWindow();
-        const sf  = (await primaryMonitor())?.scaleFactor ?? 1;
-        const w   = BASE_W.value;
-        const h   = BASE_H.value;
+        const sf = (await primaryMonitor())?.scaleFactor ?? 1;
+        const w = BASE_W.value;
+        const h = BASE_H.value;
 
         const saved = localStorage.getItem("mascot-anchor");
         if (saved) {
@@ -155,11 +158,11 @@ export function useWindowManager(deps: WindowManagerDeps) {
             if (monitor) {
                 const { width, height } = monitor.size;
                 const margin = Math.round(16 * sf);
-                const physW  = Math.round(w * sf);
-                const physH  = Math.round(h * sf);
+                const physW = Math.round(w * sf);
+                const physH = Math.round(h * sf);
                 await win.setSize(new LogicalSize(w, h));
                 await win.setPosition(new PhysicalPosition(
-                    width  - physW - margin,
+                    width - physW - margin,
                     height - physH - margin,
                 ));
             }
