@@ -415,5 +415,6 @@ async def websocket_chat(websocket: WebSocket):
 
     except WebSocketDisconnect:
         print(f"[WS] 会话 {session_id} 断开（角色：{session_character_id}）")
-        extractor.on_session_end(session_messages)
+        # 收尾提取必须 await，否则 task 会在协程结束后被丢弃
+        await extractor.on_session_end(session_messages)
         summary_queue.flush_now()

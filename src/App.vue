@@ -81,39 +81,41 @@
     const unlisten: (() => void)[] = [];
 
     onMounted(async () => {
-        // WebSocket 连接最优先启动，不受后续 await 影响
+        console.time("[⏱ onMounted 总耗时]");
         connectWS();
 
-        // 初始化窗口位置（锚点恢复 / 首次默认右下角）
-        await initWindowPosition();
+        const [,, ...unlisteners] = await Promise.all([
+            (async () => {
+                console.time("[⏱ initWindowPosition]");
+                await initWindowPosition();
+                console.timeEnd("[⏱ initWindowPosition]");
+            })(),
+            (async () => {
+                console.time("[⏱ initLive2D]");
+                await initLive2D();
+                console.timeEnd("[⏱ initLive2D]");
+            })(),
+            listen("config-changed", (e) => {
+                const payload = e.payload as {
+                    llm?: object; character?: object;
+                    memory_window?: number; character_id?: string; vision?: object;
+                };
+                sendConfigure(payload);
+            }),
+            listen("mascot-hover", (e) => {
+                showUnlock.value = e.payload as boolean;
+            }),
+            listen("open-settings", async () => {
+                await invoke("open_settings");
+            }),
+            listen("model-changed", async (e) => {
+                const path = (e.payload as { path: string }).path;
+                await reloadLive2D(path);
+            }),
+        ]);
 
-        // Tauri 事件监听
-        unlisten.push(await listen("config-changed", (e) => {
-            const payload = e.payload as {
-                llm?:          object;
-                character?:    object;
-                memory_window?: number;
-                character_id?: string;
-                vision?:       object;
-            };
-            sendConfigure(payload);
-        }));
-
-        unlisten.push(await listen("mascot-hover", (e) => {
-            showUnlock.value = e.payload as boolean;
-        }));
-
-        unlisten.push(await listen("open-settings", async () => {
-            await invoke("open_settings");
-        }));
-
-        unlisten.push(await listen("model-changed", async (e) => {
-            const path = (e.payload as { path: string }).path;
-            await reloadLive2D(path);
-        }));
-
-        // Live2D 初始化（最后执行，不阻塞上方逻辑）
-        await initLive2D();
+        unlisten.push(...unlisteners);
+        console.timeEnd("[⏱ onMounted 总耗时]");
     });
 
     onUnmounted(() => {

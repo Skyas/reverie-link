@@ -9,6 +9,21 @@ export default defineConfig(async () => ({
     plugins: [vue()],
     clearScreen: false,
 
+    // ── 预构建优化 ─────────────────────────────────────────────────
+    // 显式列出重量级依赖，让 Vite 在首次启动时即完成 CJS→ESM 转换并缓存，
+    // 后续启动直接复用缓存，跳过依赖扫描阶段。
+    // pixi.js + pixi-live2d-display 是项目中体积最大的两个包，预构建收益最显著。
+    optimizeDeps: {
+        include: [
+            "pixi.js",
+            "pixi-live2d-display/cubism4",
+            "vue",
+            "@tauri-apps/api/event",
+            "@tauri-apps/api/core",
+            "@tauri-apps/api/window",
+        ],
+    },
+
     build: {
         rollupOptions: {
             input: {

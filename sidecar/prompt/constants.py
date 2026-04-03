@@ -1,11 +1,10 @@
 """
-prompt/constants.py — 常量与触发短语池
+prompt/constants.py — 常量
 
 包含：
-  DEFAULT_CHARACTER   — 默认角色模板（与 SettingsApp.vue 的 DEFAULT_PRESET 保持一致）
-  WINDOW_PRESETS      — 5 档滑动窗口配置
+  DEFAULT_CHARACTER    — 默认角色模板（与 SettingsApp.vue 的 DEFAULT_PRESET 保持一致）
+  WINDOW_PRESETS       — 5 档滑动窗口配置
   DEFAULT_WINDOW_INDEX — 默认档位（均衡档）
-  _TRIGGER_*_PHRASES  — 主动发言触发短语池
 """
 
 # ── 默认角色模板 ──────────────────────────────────────────────────────────
@@ -50,30 +49,3 @@ WINDOW_PRESETS = [
 ]
 
 DEFAULT_WINDOW_INDEX = 1  # 均衡档
-
-
-# ── 主动发言触发短语池（随机化，打破 LLM 固定回复模式）──────────────────────
-_TRIGGER_GAME_PHRASES = [
-    "你看到画面上发生了什么？用你的方式说几句。",
-    "刚才画面里好像有点意思，你怎么看？",
-    "你一直在旁边看着呢，说说你观察到的。",
-    "对刚才屏幕上的内容，有什么想法？",
-    "画面有变化，随便聊聊你看到的。",
-    "有什么想吐槽的吗？",
-    "你觉得刚才那波怎么样？",
-]
-
-_TRIGGER_IDLE_PHRASES = [
-    "好安静啊，你想说点什么吗？",
-    "已经好一会儿没动静了，你在想什么？",
-    "有点无聊了吧？",
-    "你还在吗？",
-    "好像很久没动了呢。",
-]
-
-_TRIGGER_GENERAL_PHRASES = [
-    "你注意到什么了吗？随便说说。",
-    "你在旁边看了一会儿了，有什么想说的？",
-    "说说你的感受吧。",
-    "有什么想说的吗？",
-]

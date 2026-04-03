@@ -10,35 +10,70 @@ prompt/messages.py — LLM messages 列表组装
 """
 
 import re
-import random
 import time
 from typing import Optional
 
 from .constants import WINDOW_PRESETS, DEFAULT_WINDOW_INDEX
-from .constants import (
-    _TRIGGER_GAME_PHRASES,
-    _TRIGGER_IDLE_PHRASES,
-    _TRIGGER_GENERAL_PHRASES,
+from .system_prompt import (
+    _build_memory_layer,
+    _build_time_note,
+    _HARD_CONSTRAINT,
 )
-from .system_prompt import _build_memory_layer, _build_time_note
+
+
+# ── 视觉主动发言：模块级常量 ──────────────────────────────────────────────
+
+# 操作状态标签（player_state → 事实描述，不包含行为指导）
+_PLAYER_STATE_LABELS = {
+    "playing":    "用户正在操作角色",
+    "spectating": "画面中操作的不是用户（死亡回放/观战/队友视角）",
+    "in_menu":    "用户在菜单/商店/设置界面",
+    "cutscene":   "正在播放过场动画/剧情",
+    "waiting":    "用户在等待（加载/匹配/复活等）",
+}
+
+# 场景方向引导（scene_type → 主动发言时 LLM 的方向提示）
+# 注意：只引导"可以从什么方向说话"，不限制语气和用词，语气由角色定义决定
+_SCENE_DIRECTIONS = {
+    "game": (
+        "你正在旁边看{address}玩游戏。可以从以下方向中选一个自然地说：\n"
+        "- 对画面里具体发生的事做反应\n"
+        "- 找个日常话题聊（吃什么、最近怎么样、接下来的安排）\n"
+        "- 聊聊你记忆中知道的事\n"
+        "- 表达你当前的心情\n"
+        "选最自然的一个方向就好，不需要都覆盖。"
+    ),
+    "video": (
+        "你注意到{address}在看视频。可以对画面内容做轻松反应，"
+        "也可以找个话题聊聊，或者表达你的心情。"
+    ),
+    "work": (
+        "你注意到{address}在工作。不要评论工作内容，"
+        "可以关心一下（提醒休息、喝水），或者找个轻松话题聊几句。"
+    ),
+    "browsing": (
+        "你注意到{address}在浏览网页。可以轻松地聊几句，"
+        "找个话题，或者表达你的心情。"
+    ),
+    "idle": (
+        "{address}好像不在屏幕前。你可以自言自语，表达等待的情绪，"
+        "找个话题自己嘟囔几句，或者回忆点什么。"
+    ),
+}
 
 
 # ── 滑动窗口裁剪 ──────────────────────────────────────────────────────────
+
 def trim_history(
     history: list[dict],
     window_index: int = DEFAULT_WINDOW_INDEX,
 ) -> list[dict]:
     """
     对带时间戳的扩展 history 执行「时间窗口 + 轮数」交集裁剪。
-
-    两个条件取交集：
-      - 时间窗口：丢弃 N 分钟前的消息
-      - 最大轮数：限制 Token 上限
-    这样既防止高频聊天爆 Token，又确保旧消息不占用上下文。
     """
     idx = max(0, min(window_index, len(WINDOW_PRESETS) - 1))
     _, time_window_seconds, max_rounds = WINDOW_PRESETS[idx]
-    max_items = max_rounds * 2  # 1 轮 = 1 user + 1 assistant
+    max_items = max_rounds * 2
 
     now = time.time()
     cutoff = now - time_window_seconds
@@ -49,14 +84,25 @@ def trim_history(
     return trimmed
 
 
-# ── 内部辅助：组装 system 层（角色定义 + 时间 + 记忆）────────────────────
+# ── 内部辅助：组装完整 system 层 ──────────────────────────────────────────
+
 def _build_full_system(
     system_prompt: str,
     character_id: str = "",
     character_name: str = "",
     relevant_summaries: Optional[list[str]] = None,
+    *,
+    append_hard_constraint: bool = True,
+    extra_suffix: str = "",
 ) -> str:
-    """将 Layer1 角色定义、时间注记、Layer2 记忆拼接为完整 system 字符串。"""
+    """
+    将 Layer1 角色定义、记忆、时间注记拼接为完整 system 字符串。
+    硬性约束始终追加到最末尾（Gemini recency bias 友好）。
+
+    参数：
+      append_hard_constraint: 是否追加硬性约束（默认 True，视觉主动发言会自行追加更具体的版本）
+      extra_suffix: 额外追加到最末尾的文本（用于视觉上下文等）
+    """
     memory_layer = _build_memory_layer(
         character_id=character_id,
         character_name=character_name,
@@ -64,13 +110,51 @@ def _build_full_system(
     )
     time_note = _build_time_note()
 
-    full = system_prompt + "\n\n" + time_note
+    # 拼接顺序：角色定义 → 记忆 → 时间 → 额外内容 → 硬性约束
+    # 记忆紧跟角色定义（语义连贯），时间在记忆后（辅助信息），
+    # 硬性约束在最末尾（recency bias 最强位置）
+    full = system_prompt
     if memory_layer:
         full += "\n\n" + memory_layer
+    full += "\n\n" + time_note
+    if extra_suffix:
+        full += "\n\n" + extra_suffix
+    if append_hard_constraint:
+        full += "\n\n" + _HARD_CONSTRAINT
     return full
 
 
+def _prepare_base(
+    system_prompt: str,
+    history: list[dict],
+    window_index: int,
+    character_id: str,
+    character_name: str,
+    relevant_summaries: Optional[list[str]],
+    **full_system_kwargs,
+) -> tuple[list[dict], str]:
+    """
+    公共流程：裁剪历史 + 构建完整 system + 返回 (messages_with_system_and_history, full_system_text)。
+    三个 build_*_messages 函数复用此逻辑。
+    """
+    trimmed = trim_history(history, window_index)
+    clean_history = [
+        {"role": msg["role"], "content": msg["content"]}
+        for msg in trimmed
+    ]
+
+    full_system = _build_full_system(
+        system_prompt, character_id, character_name, relevant_summaries,
+        **full_system_kwargs,
+    )
+
+    messages = [{"role": "system", "content": full_system}]
+    messages.extend(clean_history)
+    return messages, full_system
+
+
 # ── 普通对话 ──────────────────────────────────────────────────────────────
+
 def build_messages(
     system_prompt: str,
     history: list[dict],
@@ -80,26 +164,17 @@ def build_messages(
     character_name: str = "",
     relevant_summaries: Optional[list[str]] = None,
 ) -> list[dict]:
-    """
-    组装完整的 messages 列表传给 LLM API（普通文字对话路径）。
-    """
-    trimmed = trim_history(history, window_index)
-    clean_history = [
-        {"role": msg["role"], "content": msg["content"]}
-        for msg in trimmed
-    ]
-
-    full_system = _build_full_system(
-        system_prompt, character_id, character_name, relevant_summaries
+    """组装完整的 messages 列表传给 LLM API（普通文字对话路径）。"""
+    messages, _ = _prepare_base(
+        system_prompt, history, window_index,
+        character_id, character_name, relevant_summaries,
     )
-
-    messages = [{"role": "system", "content": full_system}]
-    messages.extend(clean_history)
     messages.append({"role": "user", "content": user_message})
     return messages
 
 
 # ── 用户主动截屏（VLM 分析结果注入文字）─────────────────────────────────
+
 def build_screenshot_messages(
     system_prompt: str,
     history: list[dict],
@@ -111,17 +186,12 @@ def build_screenshot_messages(
     relevant_summaries: Optional[list[str]] = None,
 ) -> list[dict]:
     """
-    用户主动请求观察屏幕时，将截图分析结果（文字描述）注入对话上下文后组装 messages。
-    适用于主模型不支持多模态的情况（由 VLM 先分析，再把描述文字传入这里）。
+    用户主动请求观察屏幕时，将截图分析结果注入对话上下文。
+    适用于主模型不支持多模态的情况。
     """
-    trimmed = trim_history(history, window_index)
-    clean_history = [
-        {"role": msg["role"], "content": msg["content"]}
-        for msg in trimmed
-    ]
-
-    full_system = _build_full_system(
-        system_prompt, character_id, character_name, relevant_summaries
+    messages, _ = _prepare_base(
+        system_prompt, history, window_index,
+        character_id, character_name, relevant_summaries,
     )
 
     scene_type  = screenshot_info.get("scene_type", "unknown")
@@ -130,24 +200,22 @@ def build_screenshot_messages(
     game_genre  = screenshot_info.get("game_genre")
     confidence  = screenshot_info.get("confidence", "low")
 
-    screen_ctx_parts = [f"【屏幕分析结果】\n场景：{scene_type}，{desc}"]
+    screen_parts = [f"【屏幕分析结果】场景：{scene_type}，{desc}"]
     if game_name:
         line = f"游戏：{game_name}"
         if game_genre:
             line += f"（{game_genre}）"
-        screen_ctx_parts.append(line)
-    screen_ctx_parts.append(f"置信度：{confidence}")
-    screen_context = "\n".join(screen_ctx_parts)
+        screen_parts.append(line)
+    screen_parts.append(f"置信度：{confidence}")
 
-    combined_user_msg = f"{user_message}\n\n{screen_context}"
+    combined_user_msg = f"{user_message}\n\n" + "\n".join(screen_parts)
 
-    messages = [{"role": "system", "content": full_system}]
-    messages.extend(clean_history)
     messages.append({"role": "user", "content": combined_user_msg})
     return messages
 
 
 # ── 多模态截屏（图片直接嵌入消息体）────────────────────────────────────
+
 def build_multimodal_screenshot_messages(
     system_prompt: str,
     history: list[dict],
@@ -160,25 +228,18 @@ def build_multimodal_screenshot_messages(
     relevant_summaries: Optional[list[str]] = None,
 ) -> list[dict]:
     """
-    多模态截屏消息：图片以 base64 方式直接嵌入 LLM 消息，跳过 VLM 中转。
-    仅在主模型支持多模态（如 GPT-4o / Claude 3.5）时使用，省去一次 VLM 调用。
+    多模态截屏消息：图片以 base64 直接嵌入，跳过 VLM 中转。
+    仅在主模型支持多模态时使用。
     """
-    trimmed = trim_history(history, window_index)
-    clean_history = [
-        {"role": msg["role"], "content": msg["content"]}
-        for msg in trimmed
-    ]
-
-    full_system = _build_full_system(
-        system_prompt, character_id, character_name, relevant_summaries
+    messages, _ = _prepare_base(
+        system_prompt, history, window_index,
+        character_id, character_name, relevant_summaries,
     )
 
     observe_hint = f"（当前窗口：{window_title}）" if window_title else ""
     text_content = f"{user_message}\n\n请观察这张屏幕截图{observe_hint}，结合画面内容回复。"
     img_url = f"data:image/jpeg;base64,{img_b64}"
 
-    messages = [{"role": "system", "content": full_system}]
-    messages.extend(clean_history)
     messages.append({
         "role": "user",
         "content": [
@@ -190,6 +251,7 @@ def build_multimodal_screenshot_messages(
 
 
 # ── 视觉感知主动发言 ──────────────────────────────────────────────────────
+
 def build_vision_speech_messages(
     system_prompt: str,
     trigger: dict,
@@ -203,30 +265,13 @@ def build_vision_speech_messages(
     """
     为视觉感知主动发言组装 LLM messages。
 
-    改进点（相比最初版本）：
-      1. 注入最近对话历史 → AI 知道上下文，不会每次主动发言都"失忆"
-      2. 传入 recent_speeches → 防重复
-      3. 视觉上下文作为独立 system 消息注入（放在历史之后，确保 LLM 最后读到画面）
-      4. 触发消息随机化 → 打破固定回复模式
-      5. 融入 activity_context 和 player_state
-
-    trigger 格式（来自 VisionSystem._check_speech）：
-      {
-        "reason":         "interest_threshold" | "silence_fallback" | "idle_nudge",
-        "context_prompt": str,
-        "scene_info":     {
-          "scene_type":        str,
-          "scene_description": str,
-          "game_name":         str | None,
-          "game_genre":        str | None,
-          "confidence":        str,
-          "scene_instruction": str,
-          "activity_context":  str,
-          "player_state":      str,   # playing|spectating|in_menu|cutscene|waiting|unknown
-        },
-        "session_id":   str,
-        "character_id": str,
-      }
+    核心改动（相比旧版）：
+      1. 触发方式从伪装 user 消息改为 system 指令 + 方向引导
+      2. user 消息改为不可回应的旁白格式
+      3. 风格指令改为正向引导，不再硬禁特定词汇
+      4. 合并为单条 system 消息（兼容 Gemini）
+      5. 硬性约束 + 角色性格提醒追加到最末尾
+      6. 支持传入 relevant_summaries（向量记忆）
     """
     scene_info   = trigger.get("scene_info", {})
     ctx_prompt   = trigger.get("context_prompt", "")
@@ -239,27 +284,12 @@ def build_vision_speech_messages(
     desc         = scene_info.get("scene_description", "")
     activity_ctx = scene_info.get("activity_context", "")
     player_state = scene_info.get("player_state", "unknown")
+    address      = trigger.get("address", "用户")
 
     recent_speeches = recent_speeches or []
     history         = history or []
 
-    # ── 第一层 system：角色定义 + 时间 + 记忆 ────────────────────────
-    # 和普通对话使用相同的 system prompt，保持人格一致性。
-    # 主动发言时移除 [NEED_SCREENSHOT] 相关指令（桌宠自己在看屏幕，该指令无意义）。
-    full_system = _build_full_system(
-        system_prompt, character_id, character_name, relevant_summaries
-    )
-    full_system = re.sub(
-        r'\n【屏幕观察】.*?\[NEED_SCREENSHOT\].*?。',
-        '',
-        full_system,
-        flags=re.DOTALL,
-    )
-
-    # ── 第二层：视觉上下文（独立构建） ───────────────────────────────
-    # 为什么不直接塞进 full_system？
-    # LLM 对超长 system prompt 中间段落的注意力最弱，
-    # 放在历史之后、触发消息之前可确保 LLM 最后读到的是画面信息。
+    # ── 构建视觉上下文文本 ────────────────────────────────────────
     vision_parts = []
 
     # 画面观测摘要（事件缓冲池输出）
@@ -278,103 +308,78 @@ def build_vision_speech_messages(
     if activity_ctx:
         vision_parts.append(f"用户状态：{activity_ctx}")
     if player_state and player_state != "unknown":
-        _player_state_labels = {
-            "playing":    "用户正在操作自己的角色",
-            "spectating": "用户正在观看他人（死亡回放/队友视角/观战等）",
-            "in_menu":    "用户在菜单/商店/设置界面",
-            "cutscene":   "正在播放过场动画/剧情",
-            "waiting":    "用户在等待（加载/匹配/复活/队友操作/对手操作等）",
-        }
-        label = _player_state_labels.get(player_state, "")
+        label = _PLAYER_STATE_LABELS.get(player_state, "")
         if label:
             vision_parts.append(f"操作状态：{label}")
 
-    # 认知置信度约束
+    # 认知置信度约束（事实描述，不限制语气）
     if confidence == "high" and game_name:
         vision_parts.append("（你了解这个游戏，可以评论策略和机制）")
     elif confidence == "medium" and game_genre:
-        vision_parts.append("（只评论画面里能看到的内容，可以基于游戏类型做通用评论）")
+        vision_parts.append("（只评论画面能看到的内容，可基于游戏类型做通用评论）")
     else:
-        vision_parts.append("（只做基础陪伴式评论，不假设具体游戏机制）")
+        vision_parts.append("（只做陪伴式评论，不假设具体游戏机制）")
 
-    # 场景行为指令
+    # 场景行为指令（来自 scene_manager）
     if instruction:
-        vision_parts.append(f"\n{instruction}")
+        vision_parts.append(instruction)
 
-    # 防重复指令
+    # 方向引导（替代旧的触发短语池 + 硬禁词风格指令）
+    direction_template = _SCENE_DIRECTIONS.get(
+        scene_type,
+        _SCENE_DIRECTIONS.get("idle" if reason == "idle_nudge" else "browsing"),
+    )
+    if direction_template:
+        vision_parts.append(f"\n{direction_template.format(address=address)}")
+
+    # 防重复指令（精简版）
     if recent_speeches:
-        recent_text = " / ".join(f"「{s[:30]}」" for s in recent_speeches[-3:])
+        recent_text = " / ".join(f"「{s[:25]}」" for s in recent_speeches[-3:])
         vision_parts.append(
-            f"\n【防重复】你最近说过这些话：{recent_text}\n"
-            f"这次必须说完全不同的内容，用不同的句式和切入点。"
-            f"如果画面确实没什么新变化值得说，"
-            f"你可以选择只回复一个语气词（如「嗯。」「哦。」）"
-            f"或者干脆不说话（回复「……」）。"
-        )
-
-    # 发言风格指令（按场景分支）
-    if scene_type == "game":
-        _game_style_map = {
-            "spectating": (
-                "\n【发言风格】画面里不是用户在操作。"
-                "不要说'你打得好'之类的话——不是他在打。"
-                "可以评论画面中正在发生的事，或者关心一下用户的状况。"
-            ),
-            "in_menu": (
-                "\n【发言风格】用户在看菜单/商店界面。"
-                "可以对装备或选择发表看法，也可以不说话。"
-            ),
-            "waiting": (
-                "\n【发言风格】用户在等待（加载/匹配/复活）。"
-                "可以闲聊几句，不用评论画面。"
-            ),
-            "cutscene": (
-                "\n【发言风格】正在播放过场动画/剧情。"
-                "可以对剧情做反应，但不要说太多打断观看。"
-            ),
-        }
-        style_text = _game_style_map.get(
-            player_state,
-            # playing 或 unknown 默认
-            "\n【发言风格】你是坐在旁边一起看的朋友。"
-            "像看直播弹幕那样反应——"
-            "有时一个字的感叹，有时吐槽一句，有时分析两句战况。"
-            "绝对不要说'你在玩xx呢''加油''好厉害'这种空话。"
-            "必须针对画面里具体发生的事情说话。"
-        )
-        vision_parts.append(style_text)
-    elif scene_type == "idle" or reason == "idle_nudge":
-        vision_parts.append(
-            "\n【发言风格】你在自言自语或表达等待。"
-            "不需要每次都问用户在不在——有时只是叹口气，"
-            "有时自顾自嘟囔几句。"
+            f"\n你最近说过：{recent_text}\n"
+            "这次说不同的内容。如果没什么可说的，可以只回复一个语气词或「……」。"
         )
 
     vision_context = "\n".join(vision_parts)
 
-    # ── 组装最终 messages ────────────────────────────────────────────
+    # ── 组装完整 system（单条，兼容所有 API）────────────────────
+
+    # 移除 [NEED_SCREENSHOT] 指令（主动发言时桌宠自己在看屏幕，该指令无意义）
+    clean_system_prompt = re.sub(
+        r'\n【屏幕观察】[^\n]*\[NEED_SCREENSHOT\][^\n]*',
+        '',
+        system_prompt,
+    )
+
+    # 尾部追加：角色性格提醒 + 硬性约束（Gemini recency bias 友好）
+    personality_reminder = (
+        "【重要提醒】你是有性格的角色，始终保持开头定义的性格和说话风格。"
+        "用自己的语气说话。禁超50字。只输出角色的话。"
+    )
+
+    full_system = _build_full_system(
+        clean_system_prompt,
+        character_id,
+        character_name,
+        relevant_summaries,
+        append_hard_constraint=False,  # 我们用更具体的 personality_reminder 替代通用约束
+        extra_suffix=vision_context + "\n\n" + personality_reminder,
+    )
+
+    # ── 组装 messages ─────────────────────────────────────────────
     messages = [{"role": "system", "content": full_system}]
 
-    # 注入最近对话历史（让 AI 知道上下文，最多取最近 4 轮 / 8 条）
+    # 注入最近对话历史（让 AI 知道上下文，最多 4 轮 / 8 条）
     if history:
         trimmed = trim_history(history, window_index)
         recent_history = trimmed[-8:]
         clean = [{"role": m["role"], "content": m["content"]} for m in recent_history]
         messages.extend(clean)
 
-    # 视觉上下文作为独立 system 消息（放在历史之后，确保 LLM 最后读到画面信息）
-    # 注意：不是所有 API 都支持多条 system 消息。
-    # 如果你的 LLM API 不支持，可改为追加到 messages[0]["content"] 末尾。
-    messages.append({"role": "system", "content": vision_context})
-
-    # 触发消息随机化（打破固定回复模式）
-    if scene_type == "game":
-        trigger_phrase = random.choice(_TRIGGER_GAME_PHRASES)
-    elif scene_type == "idle" or reason == "idle_nudge":
-        trigger_phrase = random.choice(_TRIGGER_IDLE_PHRASES)
-    else:
-        trigger_phrase = random.choice(_TRIGGER_GENERAL_PHRASES)
-
-    messages.append({"role": "user", "content": trigger_phrase})
+    # 触发消息：旁白格式，LLM 不会当成用户说话来回应
+    messages.append({
+        "role": "user",
+        "content": "（桌宠内心活动：想主动说点什么）",
+    })
 
     return messages
