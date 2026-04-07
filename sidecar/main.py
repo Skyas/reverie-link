@@ -60,6 +60,10 @@ LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com")
 LLM_API_KEY  = os.getenv("LLM_API_KEY", "")
 LLM_MODEL    = os.getenv("LLM_MODEL", "deepseek-chat")
 
+LLM_TEMPERATURE = 0.8
+LLM_TOP_P = 0.9
+LLM_FREQ_PENALTY = 0.5
+
 # 滑动窗口上限保护（deque maxlen）
 _MAX_HISTORY_ITEMS = WINDOW_PRESETS[-1][2] * 2  # 极限档 35 轮 × 2 = 70 条
 
@@ -81,7 +85,7 @@ async def lifespan(app: FastAPI):
     global vision_system
     init_memory_system()
     vision_system = VisionSystem(speech_queue=vision_speech_queue)
-    vision_system.start()
+    # vision_system.start()
     yield
     if vision_system:
         vision_system.stop()
@@ -135,8 +139,17 @@ async def api_memory_window():
 async def websocket_chat(websocket: WebSocket):
     await websocket.accept()
 
+    # 【1. 全局变量统一在最顶端声明】
     global llm_client, LLM_MODEL, current_character, system_prompt
     global current_window_index, current_character_id
+    global LLM_TEMPERATURE, LLM_TOP_P, LLM_FREQ_PENALTY
+    global vision_system, vision_speech_queue
+
+    # 【2. 极简唤醒】只要前端连进来，直接启动视觉系统
+    if not vision_system:
+        vision_system = VisionSystem(speech_queue=vision_speech_queue)
+    vision_system.start()
+    print("[后端状态] 前端已连接，视觉与键鼠监控服务：已唤醒 ✅")
 
     session_id           = generate_session_id()
     history: deque[dict] = deque(maxlen=_MAX_HISTORY_ITEMS)
@@ -162,7 +175,6 @@ async def websocket_chat(websocket: WebSocket):
 
     try:
         while True:
-            # 同时监听用户消息和视觉主动发言队列（1 秒轮询间隔）
             raw = None
             try:
                 raw = await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
@@ -179,6 +191,10 @@ async def websocket_chat(websocket: WebSocket):
                     speech_queue=vision_speech_queue,
                     window_index=session_window_index,
                     character_name=current_character.get("name", ""),
+                    # 透传采样参数给主动发言
+                    temperature=LLM_TEMPERATURE,
+                    top_p=LLM_TOP_P,
+                    frequency_penalty=LLM_FREQ_PENALTY
                 )
                 continue
 
@@ -202,6 +218,10 @@ async def websocket_chat(websocket: WebSocket):
                 if llm_cfg.get("api_key") and llm_cfg.get("base_url"):
                     llm_client = AsyncOpenAI(api_key=llm_cfg["api_key"], base_url=llm_cfg["base_url"])
                     LLM_MODEL  = llm_cfg.get("model", LLM_MODEL)
+                    # 更新采样参数
+                    LLM_TEMPERATURE = float(llm_cfg.get("temperature", LLM_TEMPERATURE))
+                    LLM_TOP_P = float(llm_cfg.get("top_p", LLM_TOP_P))
+                    LLM_FREQ_PENALTY = float(llm_cfg.get("frequency_penalty", LLM_FREQ_PENALTY))
 
                 if char_cfg:
                     current_character = {**DEFAULT_CHARACTER, **char_cfg}
@@ -261,7 +281,6 @@ async def websocket_chat(websocket: WebSocket):
             )
             save_message(user_timeline_msg)
 
-            # 关键词快筛 — 用户是否请求观察屏幕
             user_wants_screenshot = bool(_SCREENSHOT_KEYWORDS.search(user_msg))
             screenshot_info: Optional[dict] = None
             multimodal_screenshot: Optional[dict] = None
@@ -272,13 +291,11 @@ async def websocket_chat(websocket: WebSocket):
                 else:
                     screenshot_info = await vision_system.capture_for_user()
 
-            # 检索相关摘要，注入 Layer 2
             relevant = retrieve_relevant_summaries(
                 query=user_msg,
                 character_id=session_character_id,
             )
 
-            # 组装 messages
             if multimodal_screenshot and not multimodal_screenshot.get("error"):
                 messages = build_multimodal_screenshot_messages(
                     system_prompt, list(history), user_msg,
@@ -307,7 +324,6 @@ async def websocket_chat(websocket: WebSocket):
                     relevant_summaries=relevant,
                 )
 
-            # 计算被滑动窗口移出的消息，推入摘要队列
             kept_count    = len(_trim(list(history), session_window_index))
             evicted_count = len(history) - kept_count
             if evicted_count > 0:
@@ -319,7 +335,10 @@ async def websocket_chat(websocket: WebSocket):
             try:
                 response = await llm_client.chat.completions.create(
                     model=LLM_MODEL, messages=messages,
-                    max_tokens=300, temperature=0.85,
+                    max_tokens=300,
+                    temperature=LLM_TEMPERATURE,
+                    top_p=LLM_TOP_P,
+                    frequency_penalty=LLM_FREQ_PENALTY
                 )
                 reply = response.choices[0].message.content.strip()
             except Exception as e:
@@ -341,7 +360,6 @@ async def websocket_chat(websocket: WebSocket):
                 ))
                 continue
 
-            # [NEED_SCREENSHOT] 标签兜底检测
             if reply.startswith("[NEED_SCREENSHOT]") and vision_system and not screenshot_info and not multimodal_screenshot:
                 if vision_system.is_main_multimodal:
                     fallback_shot = await vision_system.capture_screenshot_only()
@@ -356,7 +374,10 @@ async def websocket_chat(websocket: WebSocket):
                             relevant_summaries=relevant,
                         )
                         try:
-                            r2    = await llm_client.chat.completions.create(model=LLM_MODEL, messages=msgs2, max_tokens=300, temperature=0.85)
+                            r2    = await llm_client.chat.completions.create(
+                                model=LLM_MODEL, messages=msgs2, max_tokens=300,
+                                temperature=LLM_TEMPERATURE, top_p=LLM_TOP_P, frequency_penalty=LLM_FREQ_PENALTY
+                            )
                             reply = r2.choices[0].message.content.strip()
                         except Exception:
                             pass
@@ -372,19 +393,21 @@ async def websocket_chat(websocket: WebSocket):
                             relevant_summaries=relevant,
                         )
                         try:
-                            r2    = await llm_client.chat.completions.create(model=LLM_MODEL, messages=msgs2, max_tokens=300, temperature=0.85)
+                            r2    = await llm_client.chat.completions.create(
+                                model=LLM_MODEL, messages=msgs2, max_tokens=300,
+                                temperature=LLM_TEMPERATURE, top_p=LLM_TOP_P, frequency_penalty=LLM_FREQ_PENALTY
+                            )
                             reply = r2.choices[0].message.content.strip()
                         except Exception:
                             pass
 
-            # 情绪提取 + 标签剥离
             emotion     = _extract_emotion(reply)
+            reply = re.sub(r'[<＜]event[>＞].*?[<＜]/event[>＞]', '', reply, flags=re.DOTALL | re.IGNORECASE).strip()
             clean_reply = re.sub(r'\[(happy|sad|angry|shy|surprised|neutral|sigh)\]', '', reply, flags=re.IGNORECASE)
             clean_reply = re.sub(r'\[NEED_SCREENSHOT\]', '', clean_reply, flags=re.IGNORECASE)
             clean_reply = re.sub(r'\[[a-zA-Z_]+\]', '', clean_reply)
             clean_reply = clean_reply.strip()
 
-            # 写入时间线
             ai_timeline_msg = TimelineMessage.create(
                 msg_type=MessageType.AI_REPLY,
                 content=clean_reply,
@@ -403,8 +426,6 @@ async def websocket_chat(websocket: WebSocket):
             session_messages.append(ai_timeline_msg)
             extractor.on_round_complete(session_messages)
 
-            # 发送原始 reply（含情绪标签），由前端 parseEmotion 负责剥离和解析。
-            # clean_reply 只用于存库和写入对话历史，不发往前端。
             await websocket.send_text(json.dumps(
                 {"type": "chat_response", "message": reply},
                 ensure_ascii=False,
@@ -415,6 +436,11 @@ async def websocket_chat(websocket: WebSocket):
 
     except WebSocketDisconnect:
         print(f"[WS] 会话 {session_id} 断开（角色：{session_character_id}）")
-        # 收尾提取必须 await，否则 task 会在协程结束后被丢弃
         await extractor.on_session_end(session_messages)
         summary_queue.flush_now()
+        
+        # 【3. 极简休眠】前端断开，彻底销毁实例
+        if vision_system:
+            vision_system.stop()
+            vision_system = None
+            print("[后端状态] 前端已断开，视觉与键鼠监控服务：已休眠 💤")

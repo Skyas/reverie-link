@@ -91,6 +91,7 @@ def _build_full_system(
     character_id: str = "",
     character_name: str = "",
     relevant_summaries: Optional[list[str]] = None,
+    session_events: Optional[list[str]] = None,  # 【新增】接收短期事件簿
     *,
     append_hard_constraint: bool = True,
     extra_suffix: str = "",
@@ -98,10 +99,6 @@ def _build_full_system(
     """
     将 Layer1 角色定义、记忆、时间注记拼接为完整 system 字符串。
     硬性约束始终追加到最末尾（Gemini recency bias 友好）。
-
-    参数：
-      append_hard_constraint: 是否追加硬性约束（默认 True，视觉主动发言会自行追加更具体的版本）
-      extra_suffix: 额外追加到最末尾的文本（用于视觉上下文等）
     """
     memory_layer = _build_memory_layer(
         character_id=character_id,
@@ -110,13 +107,16 @@ def _build_full_system(
     )
     time_note = _build_time_note()
 
-    # 拼接顺序：角色定义 → 记忆 → 时间 → 额外内容 → 硬性约束
-    # 记忆紧跟角色定义（语义连贯），时间在记忆后（辅助信息），
-    # 硬性约束在最末尾（recency bias 最强位置）
     full = system_prompt
     if memory_layer:
         full += "\n\n" + memory_layer
     full += "\n\n" + time_note
+
+    # 【新增：注入会话事件簿】
+    if session_events:
+        events_text = "【当前会话短期记忆（事件簿）】\n" + "\n".join(f"- {e}" for e in session_events)
+        full += "\n\n" + events_text
+
     if extra_suffix:
         full += "\n\n" + extra_suffix
     if append_hard_constraint:
@@ -131,11 +131,11 @@ def _prepare_base(
     character_id: str,
     character_name: str,
     relevant_summaries: Optional[list[str]],
+    session_events: Optional[list[str]] = None,  # 【新增】透传短期事件簿
     **full_system_kwargs,
 ) -> tuple[list[dict], str]:
     """
     公共流程：裁剪历史 + 构建完整 system + 返回 (messages_with_system_and_history, full_system_text)。
-    三个 build_*_messages 函数复用此逻辑。
     """
     trimmed = trim_history(history, window_index)
     clean_history = [
@@ -145,6 +145,7 @@ def _prepare_base(
 
     full_system = _build_full_system(
         system_prompt, character_id, character_name, relevant_summaries,
+        session_events=session_events,  # 【新增】
         **full_system_kwargs,
     )
 
@@ -163,11 +164,12 @@ def build_messages(
     character_id: str = "",
     character_name: str = "",
     relevant_summaries: Optional[list[str]] = None,
+    session_events: Optional[list[str]] = None,  # 【新增】
 ) -> list[dict]:
-    """组装完整的 messages 列表传给 LLM API（普通文字对话路径）。"""
     messages, _ = _prepare_base(
         system_prompt, history, window_index,
         character_id, character_name, relevant_summaries,
+        session_events=session_events,
     )
     messages.append({"role": "user", "content": user_message})
     return messages
@@ -184,14 +186,12 @@ def build_screenshot_messages(
     character_id: str = "",
     character_name: str = "",
     relevant_summaries: Optional[list[str]] = None,
+    session_events: Optional[list[str]] = None,  # 【新增】
 ) -> list[dict]:
-    """
-    用户主动请求观察屏幕时，将截图分析结果注入对话上下文。
-    适用于主模型不支持多模态的情况。
-    """
     messages, _ = _prepare_base(
         system_prompt, history, window_index,
         character_id, character_name, relevant_summaries,
+        session_events=session_events,
     )
 
     scene_type  = screenshot_info.get("scene_type", "unknown")
@@ -226,14 +226,12 @@ def build_multimodal_screenshot_messages(
     character_id: str = "",
     character_name: str = "",
     relevant_summaries: Optional[list[str]] = None,
+    session_events: Optional[list[str]] = None,  # 【新增】
 ) -> list[dict]:
-    """
-    多模态截屏消息：图片以 base64 直接嵌入，跳过 VLM 中转。
-    仅在主模型支持多模态时使用。
-    """
     messages, _ = _prepare_base(
         system_prompt, history, window_index,
         character_id, character_name, relevant_summaries,
+        session_events=session_events,
     )
 
     observe_hint = f"（当前窗口：{window_title}）" if window_title else ""
@@ -261,18 +259,8 @@ def build_vision_speech_messages(
     character_id: str = "",
     character_name: str = "",
     relevant_summaries: Optional[list[str]] = None,
+    session_events: Optional[list[str]] = None,  # 【新增】
 ) -> list[dict]:
-    """
-    为视觉感知主动发言组装 LLM messages。
-
-    核心改动（相比旧版）：
-      1. 触发方式从伪装 user 消息改为 system 指令 + 方向引导
-      2. user 消息改为不可回应的旁白格式
-      3. 风格指令改为正向引导，不再硬禁特定词汇
-      4. 合并为单条 system 消息（兼容 Gemini）
-      5. 硬性约束 + 角色性格提醒追加到最末尾
-      6. 支持传入 relevant_summaries（向量记忆）
-    """
     scene_info   = trigger.get("scene_info", {})
     ctx_prompt   = trigger.get("context_prompt", "")
     reason       = trigger.get("reason", "interest_threshold")
@@ -289,14 +277,10 @@ def build_vision_speech_messages(
     recent_speeches = recent_speeches or []
     history         = history or []
 
-    # ── 构建视觉上下文文本 ────────────────────────────────────────
     vision_parts = []
-
-    # 画面观测摘要（事件缓冲池输出）
     if ctx_prompt:
         vision_parts.append(ctx_prompt)
 
-    # 场景信息
     vision_parts.append("【当前场景】")
     if game_name:
         line = f"正在玩：{game_name}"
@@ -312,7 +296,6 @@ def build_vision_speech_messages(
         if label:
             vision_parts.append(f"操作状态：{label}")
 
-    # 认知置信度约束（事实描述，不限制语气）
     if confidence == "high" and game_name:
         vision_parts.append("（你了解这个游戏，可以评论策略和机制）")
     elif confidence == "medium" and game_genre:
@@ -320,11 +303,9 @@ def build_vision_speech_messages(
     else:
         vision_parts.append("（只做陪伴式评论，不假设具体游戏机制）")
 
-    # 场景行为指令（来自 scene_manager）
     if instruction:
         vision_parts.append(instruction)
 
-    # 方向引导（替代旧的触发短语池 + 硬禁词风格指令）
     direction_template = _SCENE_DIRECTIONS.get(
         scene_type,
         _SCENE_DIRECTIONS.get("idle" if reason == "idle_nudge" else "browsing"),
@@ -332,26 +313,22 @@ def build_vision_speech_messages(
     if direction_template:
         vision_parts.append(f"\n{direction_template.format(address=address)}")
 
-    # 防重复指令（精简版）
+    # 【修改：结合短期记忆的防重复指令】
     if recent_speeches:
         recent_text = " / ".join(f"「{s[:25]}」" for s in recent_speeches[-3:])
         vision_parts.append(
-            f"\n你最近说过：{recent_text}\n"
-            "这次说不同的内容。如果没什么可说的，可以只回复一个语气词或「……」。"
+            f"\n你最近主动说过：{recent_text}\n"
+            "【重要】结合你的【当前会话短期记忆】，让话题自然推进，不要像复读机一样重复原话或纠缠同一话题（如重复抱怨）。如果没新话题，可以只回复「……」。"
         )
 
     vision_context = "\n".join(vision_parts)
 
-    # ── 组装完整 system（单条，兼容所有 API）────────────────────
-
-    # 移除 [NEED_SCREENSHOT] 指令（主动发言时桌宠自己在看屏幕，该指令无意义）
     clean_system_prompt = re.sub(
         r'\n【屏幕观察】[^\n]*\[NEED_SCREENSHOT\][^\n]*',
         '',
         system_prompt,
     )
 
-    # 尾部追加：角色性格提醒 + 硬性约束（Gemini recency bias 友好）
     personality_reminder = (
         "【重要提醒】你是有性格的角色，始终保持开头定义的性格和说话风格。"
         "用自己的语气说话。禁超50字。只输出角色的话。"
@@ -362,21 +339,19 @@ def build_vision_speech_messages(
         character_id,
         character_name,
         relevant_summaries,
-        append_hard_constraint=False,  # 我们用更具体的 personality_reminder 替代通用约束
+        session_events=session_events, # 【新增】注入事件簿
+        append_hard_constraint=False,
         extra_suffix=vision_context + "\n\n" + personality_reminder,
     )
 
-    # ── 组装 messages ─────────────────────────────────────────────
     messages = [{"role": "system", "content": full_system}]
 
-    # 注入最近对话历史（让 AI 知道上下文，最多 4 轮 / 8 条）
+    # 【修复：不再硬切 [-12:]，让你在前端设置的 window_index 重新生效！】
     if history:
         trimmed = trim_history(history, window_index)
-        recent_history = trimmed[-8:]
-        clean = [{"role": m["role"], "content": m["content"]} for m in recent_history]
+        clean = [{"role": m["role"], "content": m["content"]} for m in trimmed]
         messages.extend(clean)
 
-    # 触发消息：旁白格式，LLM 不会当成用户说话来回应
     messages.append({
         "role": "user",
         "content": "（桌宠内心活动：想主动说点什么）",

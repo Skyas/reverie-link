@@ -94,6 +94,34 @@ class VisionSystem:
     def on_user_message(self):
         self.speech_engine.on_user_message()
         self.speech_engine.set_user_interacting(True)
+        
+        # ---------------------------------------------------------
+        # 【修改：温和的驱动力释放（动态减分）】
+        # ---------------------------------------------------------
+        # 1. 获取当前的话痨档位（兜底为 2 适中档）
+        talk_level = getattr(self.speech_engine, '_talk_level', 2)
+        
+        # 2. 根据档位决定扣减的兴趣分：话痨扣得少，话少扣得多
+        reduce_map = {
+            3: 5,   # 话痨档：只减 5 分
+            2: 8,   # 适中档：减 8 分
+            1: 10   # 话少档：减 10 分
+        }
+        reduce_score = reduce_map.get(talk_level, 8)
+        
+        # 3. 执行减分，并确保最低跌到 0 分
+        old_score = self.event_buffer.accumulated_score
+        new_score = max(0, old_score - reduce_score)
+        self.event_buffer.accumulated_score = new_score
+        
+        # 4. 但不管减多少分，刚刚碰巧堆积在“嘴边”的废话必须无情删掉，防抢话
+        while not self._speech_queue.empty():
+            try:
+                self._speech_queue.get_nowait()
+            except Exception:
+                break
+                
+        print(f"[Vision] 🛑 用户主动互动，待发队列已清空。兴趣分冷却：{old_score} -> {new_score} (档位:{talk_level}, -{reduce_score})")
 
     def on_user_message_done(self):
         self.speech_engine.set_user_interacting(False)
