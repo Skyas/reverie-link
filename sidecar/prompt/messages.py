@@ -7,8 +7,16 @@ prompt/messages.py — LLM messages 列表组装
   build_screenshot_messages()           — 用户主动截屏（VLM 中转后注入文字描述）
   build_multimodal_screenshot_messages() — 多模态直传（图片嵌入消息体）
   build_vision_speech_messages()        — 视觉感知主动发言
+
+【本次重构要点】
+  1. 移除 session_events 参数 — event 机制已废弃，记忆由 history+笔记本+向量库承担
+  2. build_vision_speech_messages 新增：
+     a. 过滤 history 中 _source=="vision_proactive" 的 assistant turn
+        （切断视觉主动发言的自我强化循环）
+     b. 防复读提示改为纯否定形式，不再回喂模型最近原话
 """
 
+import logging
 import re
 import time
 from typing import Optional
@@ -19,6 +27,8 @@ from .system_prompt import (
     _build_time_note,
     _HARD_CONSTRAINT,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ── 视觉主动发言：模块级常量 ──────────────────────────────────────────────
@@ -91,7 +101,6 @@ def _build_full_system(
     character_id: str = "",
     character_name: str = "",
     relevant_summaries: Optional[list[str]] = None,
-    session_events: Optional[list[str]] = None,  # 【新增】接收短期事件簿
     *,
     append_hard_constraint: bool = True,
     extra_suffix: str = "",
@@ -112,11 +121,6 @@ def _build_full_system(
         full += "\n\n" + memory_layer
     full += "\n\n" + time_note
 
-    # 【新增：注入会话事件簿】
-    if session_events:
-        events_text = "【当前会话短期记忆（事件簿）】\n" + "\n".join(f"- {e}" for e in session_events)
-        full += "\n\n" + events_text
-
     if extra_suffix:
         full += "\n\n" + extra_suffix
     if append_hard_constraint:
@@ -131,7 +135,6 @@ def _prepare_base(
     character_id: str,
     character_name: str,
     relevant_summaries: Optional[list[str]],
-    session_events: Optional[list[str]] = None,  # 【新增】透传短期事件簿
     **full_system_kwargs,
 ) -> tuple[list[dict], str]:
     """
@@ -145,7 +148,6 @@ def _prepare_base(
 
     full_system = _build_full_system(
         system_prompt, character_id, character_name, relevant_summaries,
-        session_events=session_events,  # 【新增】
         **full_system_kwargs,
     )
 
@@ -164,12 +166,10 @@ def build_messages(
     character_id: str = "",
     character_name: str = "",
     relevant_summaries: Optional[list[str]] = None,
-    session_events: Optional[list[str]] = None,  # 【新增】
 ) -> list[dict]:
     messages, _ = _prepare_base(
         system_prompt, history, window_index,
         character_id, character_name, relevant_summaries,
-        session_events=session_events,
     )
     messages.append({"role": "user", "content": user_message})
     return messages
@@ -186,12 +186,10 @@ def build_screenshot_messages(
     character_id: str = "",
     character_name: str = "",
     relevant_summaries: Optional[list[str]] = None,
-    session_events: Optional[list[str]] = None,  # 【新增】
 ) -> list[dict]:
     messages, _ = _prepare_base(
         system_prompt, history, window_index,
         character_id, character_name, relevant_summaries,
-        session_events=session_events,
     )
 
     scene_type  = screenshot_info.get("scene_type", "unknown")
@@ -226,12 +224,10 @@ def build_multimodal_screenshot_messages(
     character_id: str = "",
     character_name: str = "",
     relevant_summaries: Optional[list[str]] = None,
-    session_events: Optional[list[str]] = None,  # 【新增】
 ) -> list[dict]:
     messages, _ = _prepare_base(
         system_prompt, history, window_index,
         character_id, character_name, relevant_summaries,
-        session_events=session_events,
     )
 
     observe_hint = f"（当前窗口：{window_title}）" if window_title else ""
@@ -253,14 +249,23 @@ def build_multimodal_screenshot_messages(
 def build_vision_speech_messages(
     system_prompt: str,
     trigger: dict,
-    recent_speeches: list[str] = None,
     history: list[dict] = None,
     window_index: int = DEFAULT_WINDOW_INDEX,
     character_id: str = "",
     character_name: str = "",
     relevant_summaries: Optional[list[str]] = None,
-    session_events: Optional[list[str]] = None,  # 【新增】
 ) -> list[dict]:
+    """
+    构造视觉主动发言的 messages。
+
+    【关键防复读机制】
+      1. 不再接收/回喂 recent_speeches —— 给模型看自己说过的原话会成为
+         强 few-shot 暗示，触发模型继续模仿那个模式（详见 DECISIONS.md）
+      2. 过滤 history 中 _source=="vision_proactive" 的 assistant turn ——
+         视觉主动发言彼此之间不相互引用，避免自我强化循环
+      3. 普通对话路径仍然能在 history 里看到 vision 主动发言（不过滤），
+         保证记忆联通
+    """
     scene_info   = trigger.get("scene_info", {})
     ctx_prompt   = trigger.get("context_prompt", "")
     reason       = trigger.get("reason", "interest_threshold")
@@ -274,8 +279,7 @@ def build_vision_speech_messages(
     player_state = scene_info.get("player_state", "unknown")
     address      = trigger.get("address", "用户")
 
-    recent_speeches = recent_speeches or []
-    history         = history or []
+    history = history or []
 
     vision_parts = []
     if ctx_prompt:
@@ -313,13 +317,14 @@ def build_vision_speech_messages(
     if direction_template:
         vision_parts.append(f"\n{direction_template.format(address=address)}")
 
-    # 【修改：结合短期记忆的防重复指令】
-    if recent_speeches:
-        recent_text = " / ".join(f"「{s[:25]}」" for s in recent_speeches[-3:])
-        vision_parts.append(
-            f"\n你最近主动说过：{recent_text}\n"
-            "【重要】结合你的【当前会话短期记忆】，让话题自然推进，不要像复读机一样重复原话或纠缠同一话题（如重复抱怨）。如果没新话题，可以只回复「……」。"
-        )
+    # 【防复读：纯否定提示，不回喂原话】
+    # 之前的实现是把 recent_speeches 的具体内容拼进 prompt，这会成为
+    # 强 few-shot 暗示，反而引发模型模仿。改为不暴露任何原话。
+    vision_parts.append(
+        "\n【表达提示】这是你的主动发言。如果当前画面没有真正值得说的新内容，"
+        "或者你刚刚已经说过类似的话了，可以直接只输出「……」三个字。"
+        "不要为了说话而说话，不要重复刚说过的话题。"
+    )
 
     vision_context = "\n".join(vision_parts)
 
@@ -339,17 +344,29 @@ def build_vision_speech_messages(
         character_id,
         character_name,
         relevant_summaries,
-        session_events=session_events, # 【新增】注入事件簿
         append_hard_constraint=False,
         extra_suffix=vision_context + "\n\n" + personality_reminder,
     )
 
     messages = [{"role": "system", "content": full_system}]
 
-    # 【修复：不再硬切 [-12:]，让你在前端设置的 window_index 重新生效！】
+    # 【防自我强化：过滤掉 history 中其他 vision_proactive 的 assistant turn】
+    # 普通对话路径不做这个过滤，那里的 build_messages 仍然能读到完整 history
     if history:
         trimmed = trim_history(history, window_index)
-        clean = [{"role": m["role"], "content": m["content"]} for m in trimmed]
+        clean = []
+        filtered_count = 0
+        for m in trimmed:
+            # 跳过其他视觉主动发言（带 _source 标记的 assistant 消息）
+            if m.get("role") == "assistant" and m.get("_source") == "vision_proactive":
+                filtered_count += 1
+                continue
+            clean.append({"role": m["role"], "content": m["content"]})
+        if filtered_count > 0:
+            logger.debug(
+                "[VisionSpeech] history 已过滤 %d 条历史 vision 主动发言（防自我强化）",
+                filtered_count,
+            )
         messages.extend(clean)
 
     messages.append({
