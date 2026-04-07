@@ -111,8 +111,8 @@ class VisionSystem:
         
         # 3. 执行减分，并确保最低跌到 0 分
         old_score = self.event_buffer.accumulated_score
-        new_score = max(0, old_score - reduce_score)
-        self.event_buffer.accumulated_score = new_score
+        self.event_buffer.reduce_score(reduce_score)
+        new_score = self.event_buffer.accumulated_score
         
         # 4. 但不管减多少分，刚刚碰巧堆积在“嘴边”的废话必须无情删掉，防抢话
         while not self._speech_queue.empty():
