@@ -39,6 +39,14 @@ export default defineConfig(async () => ({
         strictPort: true,
         host: host || false,
         hmr: host ? { protocol: "ws", host, port: 17421 } : undefined,
-        watch: { ignored: ["**/src-tauri/**"] },
+        watch: { 
+            ignored: [
+                "**/src-tauri/**",     // Tauri Rust 代码
+                "**/venv/**",          // Python 虚拟环境（核心性能杀手）
+                "**/.venv/**",         // 兼容其他命名习惯的虚拟环境
+                "**/sidecar/**",       // Python 后端源码
+                "**/public/live2d/**"  // 庞大的静态模型资源（不需要热更新参与编译）
+            ] 
+        },
     },
 }));
