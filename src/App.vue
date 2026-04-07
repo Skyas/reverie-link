@@ -497,7 +497,7 @@
         height: var(--mascot-h, 380px);
         background: var(--clr-panel-bg);
         border: 1.5px solid var(--clr-bubble-bd);
-        border-radius: 14px 14px 4px 14px;
+        border-radius: 14px 14px 14px 14px;
         backdrop-filter: blur(16px);
         -webkit-backdrop-filter: blur(16px);
         box-shadow: -2px 4px 16px rgba(126, 87, 194, 0.12);
