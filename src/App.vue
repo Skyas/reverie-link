@@ -96,23 +96,23 @@
                 await initLive2D();
                 console.timeEnd("[⏱ initLive2D]");
             })(),
-            listen("config-changed", (e) => {
-                const payload = e.payload as {
-                    llm?: object; character?: object;
-                    memory_window?: number; character_id?: string; vision?: object;
-                };
-                sendConfigure(payload);
-            }),
-            listen("mascot-hover", (e) => {
-                showUnlock.value = e.payload as boolean;
-            }),
-            listen("open-settings", async () => {
-                await invoke("open_settings");
-            }),
-            listen("model-changed", async (e) => {
-                const path = (e.payload as { path: string }).path;
-                await reloadLive2D(path);
-            }),
+            // listen("config-changed", (e) => {
+            //     const payload = e.payload as {
+            //         llm?: object; character?: object;
+            //         memory_window?: number; character_id?: string; vision?: object;
+            //     };
+            //     sendConfigure(payload);
+            // }),
+            // listen("mascot-hover", (e) => {
+            //     showUnlock.value = e.payload as boolean;
+            // }),
+            // listen("open-settings", async () => {
+            //     await invoke("open_settings");
+            // }),
+            // listen("model-changed", async (e) => {
+            //     const path = (e.payload as { path: string }).path;
+            //     await reloadLive2D(path);
+            // }),
         ]);
 
         unlisten.push(...unlisteners);

@@ -6,6 +6,13 @@ prompt/system_prompt.py — System Prompt 组装
   _build_memory_layer()   — Layer 2 记忆注入（笔记本 + 向量摘要）
   _build_time_note()      — 当前时间字符串
   _HARD_CONSTRAINT        — 硬性约束文本（供 _build_full_system 追加到最末尾）
+
+【2026-04-09 修改】
+  1. 在 build_system_prompt 末尾新增「事件计数」简洁提示
+     —— 教模型区分"实际发生过的事件"和"对话里出现过的词"
+  2. 补 print 临时日志，便于排查 prompt 组装过程
+     —— 前缀 [SystemPrompt]，与 vision/ 下既有风格保持一致
+     —— 待统一整改 logging 后改为 logger.xxx
 """
 
 import sys
@@ -75,7 +82,28 @@ def build_system_prompt(character: dict) -> str:
         "\n【屏幕观察】若判断用户想让你看屏幕，回复开头输出 [NEED_SCREENSHOT]。"
     )
 
-    return "\n".join(parts)
+    # ── 事件计数提示（2026-04-09 新增）────────────────────────────
+    # 简洁版：教模型区分"实际发生的事件"和"对话里出现过的词"
+    # 设计意图：用户问"今天 xx 几次了"这类问题时，模型常常把
+    #   ① 自己之前主动发言里抱怨的「还没 xx」当成事件痕迹数进去
+    #   ② 用户提问里出现的「xx」这个词当成事件数进去
+    # 用一句话约束最常见的两种误判，效果不完美也无所谓 —— 计数本身不是核心需求
+    parts.append(
+        "\n【关于次数】如果用户问你「今天/刚才 xx 过几次」这类问题，"
+        "只数真正发生过的动作，不要把对话里出现「xx」这个词的次数也算进去。"
+        "不确定就说「好几次了」或「大概两三次」，不要瞎报具体数字。"
+    )
+
+    full_prompt = "\n".join(parts)
+
+    # ── 临时 print 日志（待 logging 整改时改为 logger.debug）────────
+    print(
+        f"[SystemPrompt] build_system_prompt 完成 | name={name} "
+        f"length={len(full_prompt)} examples={len(examples)}",
+        flush=True,
+    )
+
+    return full_prompt
 
 
 def _build_memory_layer(
@@ -91,6 +119,9 @@ def _build_memory_layer(
     parts = []
     name = character_name or "你"
 
+    notebook_count = 0
+    notebook_error = None
+
     # ── 核心记忆（笔记本）──────────────────────────────────────────
     try:
         from memory.db_notebook import get_all_entries
@@ -105,13 +136,22 @@ def _build_memory_layer(
                 else:
                     lines.append(f"· {e.content}")
             parts.append(f"【{name}的核心记忆】\n" + "\n".join(lines))
-    except Exception:
-        pass
+            notebook_count = len(entries)
+    except Exception as e:
+        notebook_error = str(e)
 
     # ── 回忆片段（向量检索召回）────────────────────────────────────
     if relevant_summaries:
         lines = [f"· {s}" for s in relevant_summaries]
         parts.append(f"【{name}的回忆片段】\n" + "\n".join(lines))
+
+    # ── 临时 print 日志 ─────────────────────────────────────────────
+    print(
+        f"[SystemPrompt] _build_memory_layer | character_id={character_id} "
+        f"notebook_entries={notebook_count} vector_summaries={len(relevant_summaries or [])} "
+        f"notebook_error={notebook_error}",
+        flush=True,
+    )
 
     return "\n\n".join(parts)
 
