@@ -146,6 +146,20 @@ async def websocket_chat(websocket: WebSocket):
 
     if not vision_system:
         vision_system = VisionSystem(speech_queue=vision_speech_queue)
+
+    # 【2026-04-09 Bug Fix】不论 vision_system 是新建还是复用，
+    # 都先用当前全局的 llm_client / LLM_MODEL 兜底同步一次 main_llm。
+    # 修复前：VisionSystem 启动时 main_client=None，要等前端首次发送带 "vision"
+    # 字段的 configure 消息后才会被设置，在此之前 VLM 选择逻辑无法感知主模型。
+    try:
+        vision_system.set_main_llm(llm_client, LLM_MODEL)
+        print(
+            f"[Configure] vision.set_main_llm 启动兜底同步 | model={LLM_MODEL}",
+            flush=True,
+        )
+    except Exception as e:
+        print(f"[Configure] vision.set_main_llm 启动兜底同步失败: {e}", flush=True)
+
     vision_system.start()
     print("[后端状态] 前端已连接，视觉与键鼠监控服务：已唤醒 ✅")
 
@@ -212,13 +226,43 @@ async def websocket_chat(websocket: WebSocket):
             if msg_type == "configure":
                 llm_cfg  = data.get("llm", {})
                 char_cfg = data.get("character", {})
+                
+                if llm_cfg:
+                    new_base_url = llm_cfg.get("base_url", "").strip()
+                    new_api_key  = llm_cfg.get("api_key",  "").strip()
+                    new_model    = llm_cfg.get("model",    "").strip()
 
-                if llm_cfg.get("api_key") and llm_cfg.get("base_url"):
-                    llm_client = AsyncOpenAI(api_key=llm_cfg["api_key"], base_url=llm_cfg["base_url"])
-                    LLM_MODEL  = llm_cfg.get("model", LLM_MODEL)
-                    LLM_TEMPERATURE = float(llm_cfg.get("temperature", LLM_TEMPERATURE))
-                    LLM_TOP_P = float(llm_cfg.get("top_p", LLM_TOP_P))
-                    LLM_FREQ_PENALTY = float(llm_cfg.get("frequency_penalty", LLM_FREQ_PENALTY))
+                    # model 和采样参数：只要 llm_cfg 不为空就更新
+                    if new_model:
+                        LLM_MODEL = new_model
+                    LLM_TEMPERATURE  = float(llm_cfg.get("temperature",         LLM_TEMPERATURE))
+                    LLM_TOP_P        = float(llm_cfg.get("top_p",               LLM_TOP_P))
+                    LLM_FREQ_PENALTY = float(llm_cfg.get("frequency_penalty",   LLM_FREQ_PENALTY))
+
+                    # client 重建：base_url 必须有，api_key 可为空（兼容 Ollama）
+                    if new_base_url:
+                        llm_client = AsyncOpenAI(
+                            api_key  = new_api_key if new_api_key else "no-key",
+                            base_url = new_base_url,
+                        )
+                        print(f"[Configure] LLM 已更新 | model={LLM_MODEL} base_url={new_base_url} has_key={bool(new_api_key)}", flush=True)
+                    else:
+                        print(f"[Configure] model 已更新（无 base_url，跳过 client 重建）| model={LLM_MODEL}", flush=True)
+
+                    # 【2026-04-09 Bug Fix】不论本次 configure 是否同时带 "vision" 字段，
+                    # 只要 LLM 配置有更新，就立即把新的 client/model 同步给 vision 系统。
+                    # 修复前：set_main_llm 被错放在 if "vision" in data 分支内部，
+                    # 导致用户只改 LLM 厂商/模型时，vision 内部的 main_client 永远是旧值，
+                    # 表现为"切换模型后必须重启后端才生效"。
+                    if vision_system:
+                        try:
+                            vision_system.set_main_llm(llm_client, LLM_MODEL)
+                            print(
+                                f"[Configure] vision.set_main_llm 已同步（随 LLM 更新）| model={LLM_MODEL}",
+                                flush=True,
+                            )
+                        except Exception as e:
+                            print(f"[Configure] vision.set_main_llm 同步失败: {e}", flush=True)
 
                 if char_cfg:
                     current_character = {**DEFAULT_CHARACTER, **char_cfg}
@@ -237,7 +281,8 @@ async def websocket_chat(websocket: WebSocket):
 
                 if "vision" in data and vision_system:
                     vision_system.configure(data["vision"])
-                    vision_system.set_main_llm(llm_client, LLM_MODEL)
+                    # 注意：set_main_llm 不再在这里调用，已提到 if llm_cfg 分支内。
+                    # 这里只处理 vision 自己的独立配置和 session 绑定。
                     vision_system.set_session_info(
                         session_id=session_id,
                         character_id=session_character_id,
