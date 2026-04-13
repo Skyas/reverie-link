@@ -179,3 +179,7 @@ class EventBuffer:
         """清理过旧的事件（只保留最近 max_keep 条）"""
         if len(self._events) > max_keep:
             self._events = self._events[-max_keep:]
+
+    def reduce_score(self, amount: int):
+        """动态扣减兴趣分，保底为 0"""
+        self._accumulated_score = max(0, self._accumulated_score - amount)
