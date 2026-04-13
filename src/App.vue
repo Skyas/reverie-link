@@ -1,177 +1,281 @@
 <script setup lang="ts">
-    import { ref, onMounted, onUnmounted } from "vue";
-    import { listen } from "@tauri-apps/api/event";
-    import { invoke } from "@tauri-apps/api/core";
+import { ref, onMounted, onUnmounted } from "vue";
+import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 
-    import { useSizePreset } from "./composables/useSizePreset";
-    import { useLive2D } from "./composables/useLive2D";
-    import { useTTS } from "./composables/useTTS";
-    import { useWebSocket } from "./composables/useWebSocket";
-    import { useWindowManager } from "./composables/useWindowManager";
+import { useSizePreset } from "./composables/useSizePreset";
+import { useLive2D } from "./composables/useLive2D";
+import { useTTS } from "./composables/useTTS";
+import { useWebSocket } from "./composables/useWebSocket";
+import { useWindowManager } from "./composables/useWindowManager";
 
-    // ── 1. 尺寸系统（跨模块共享的唯一数据源） ────────────────────────────
-    // [FIX] 额外解构 sizePreset，用于响应 config-changed 中的尺寸切换
-    const { sizePreset, sizeConfig, BASE_W, BASE_H, INPUT_W, BUBBLE_H } = useSizePreset();
+const isDev = import.meta.env.DEV;
 
-    // ── 2. Live2D（表情 + 口型驱动，对其他模块无感知） ───────────────────
-    const canvasRef = ref<HTMLCanvasElement | null>(null);
-    const {
-        live2dReady, live2dError,
-        initLive2D, disposeLive2D, reloadLive2D,
-        setEmotion, setMouthOpen,
-    } = useLive2D(canvasRef, BASE_W, BASE_H);
+// ── 1. 尺寸系统（跨模块共享的唯一数据源） ────────────────────────────
+const { sizePreset, sizeConfig, BASE_W, BASE_H, INPUT_W, BUBBLE_H } = useSizePreset();
 
-    // ── 3. TTS（通过依赖注入接收 setMouthOpen，对 Live2D 无感知） ────────
-    const { speakText, stopTTS, destroyTTS } = useTTS({ setMouthOpen });
+// ── 2. Live2D ──────────────────────────────────────────────────────────
+const canvasRef = ref<HTMLCanvasElement | null>(null);
+const {
+    live2dReady, live2dError,
+    initLive2D, disposeLive2D, reloadLive2D,
+    setEmotion, setMouthOpen,
+} = useLive2D(canvasRef, BASE_W, BASE_H);
 
-    // ── 4. WebSocket（通过回调联结各模块，自身不引用任何其他 composable） ──
-    // 注意：回调中引用的 showBubbleWithText 在下方第 5 步定义。
-    // 由于回调是闭包（仅在消息到达时执行），到那时 showBubbleWithText 已初始化，安全。
-    const {
-        isConnected, isThinking,
-        connectWS, disconnectWS,
-        sendMessage, sendConfigure,
-    } = useWebSocket({
-        onChatResponse: (cleanText, emotion) => {
-            if (emotion) setEmotion(emotion);
-            showBubbleWithText(cleanText);
-            speakText(cleanText);
-        },
-        onVisionSpeech: (cleanText, emotion) => {
-            // 视觉感知主动发言：已在 useWebSocket 内部过滤 isThinking，此处直接处理
-            if (emotion) setEmotion(emotion);
-            showBubbleWithText(cleanText);
-            speakText(cleanText);
-        },
-        onError: (message) => {
-            showBubbleWithText("呜…出错了：" + message);
-        },
-    });
+// ── 3. TTS ─────────────────────────────────────────────────────────────
+const { speakText, stopTTS, destroyTTS } = useTTS({ setMouthOpen });
 
-    // ── 5. 窗口管理（接收 isThinking 用于 resizeToFit watch） ─────────────
-    const {
-        inputOpen, userInput, bubbleText, showBubble,
-        isLocked, showControls, showUnlock, inputRef,
-        showBubbleWithText, toggleInput,
-        onMascotEnter, onMascotLeave,
-        toggleLock, unlockFromButton,
-        startDrag, initWindowPosition,
-    } = useWindowManager({ isThinking, BASE_W, BASE_H, INPUT_W, BUBBLE_H });
+// ── 4. 静音状态（由托盘菜单控制，前端音频层生效）────────────────────────
+const isMuted = ref(false);
 
-    // ── 发送消息（在 App.vue 层组合 WS 发送 + 本地 UI 状态重置） ─────────
-    function handleSend() {
-        const msg = userInput.value.trim();
-        if (!msg || !isConnected.value || isThinking.value) return;
-        showBubble.value = false;  // 立即隐藏旧气泡
-        userInput.value = "";
-        sendMessage(msg);           // 内部设置 isThinking = true 并发送
+// ── 5. WebSocket ───────────────────────────────────────────────────────
+const {
+    isConnected, isThinking,
+    connectWS, disconnectWS,
+    sendMessage, sendConfigure,
+} = useWebSocket({
+    onChatResponse: (cleanText, emotion) => {
+        if (emotion) setEmotion(emotion);
+        showBubbleWithText(cleanText);
+        if (!isMuted.value) speakText(cleanText);
+    },
+    onVisionSpeech: (cleanText, emotion) => {
+        if (emotion) setEmotion(emotion);
+        showBubbleWithText(cleanText);
+        if (!isMuted.value) speakText(cleanText);
+    },
+    onError: (message) => {
+        showBubbleWithText("呜…出错了：" + message);
+    },
+});
+
+// ── 6. 窗口管理 ────────────────────────────────────────────────────────
+const {
+    inputOpen, userInput, bubbleText, showBubble,
+    isLocked, showControls, showUnlock, inputRef,
+    showBubbleWithText, toggleInput,
+    onMascotEnter, onMascotLeave,
+    toggleLock, unlockFromButton,
+    startDrag, initWindowPosition,
+} = useWindowManager({ isThinking, BASE_W, BASE_H, INPUT_W, BUBBLE_H });
+
+// ── 发送消息 ───────────────────────────────────────────────────────────
+function handleSend() {
+    const msg = userInput.value.trim();
+    if (!msg || !isConnected.value || isThinking.value) return;
+    showBubble.value = false;
+    userInput.value = "";
+    sendMessage(msg);
+}
+
+function handleKeydown(e: KeyboardEvent) {
+    if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        handleSend();
     }
+}
 
-    function handleKeydown(e: KeyboardEvent) {
-        if (e.key === "Enter" && !e.shiftKey) {
-            e.preventDefault();
-            handleSend();
+// ── 右键上下文菜单（DevTools 入口，开发期专用）────────────────────────
+// 正式版保留此结构，未来可扩展菜单项；DevTools 项仅在 DEV 模式下渲染
+const contextMenuVisible = ref(false);
+const contextMenuX = ref(0);
+const contextMenuY = ref(0);
+
+function handleContextMenu(e: MouseEvent) {
+    // 仅开发模式下显示菜单（正式版暂无菜单项，直接 return）
+    if (!import.meta.env.DEV) return;
+    contextMenuX.value = e.clientX;
+    contextMenuY.value = e.clientY;
+    contextMenuVisible.value = true;
+}
+
+function closeContextMenu() {
+    contextMenuVisible.value = false;
+}
+
+async function openDevTools() {
+    closeContextMenu();
+    try {
+        await invoke("open_devtools");
+        console.log("[App] DevTools 已打开");
+    } catch (e) {
+        console.error("[App] 打开 DevTools 失败:", e);
+    }
+}
+
+// ── 托盘菜单动态同步 ──────────────────────────────────────────────────
+const SIDECAR_URL = "http://localhost:18000";
+
+async function syncTrayMenu() {
+    const presetsStr = localStorage.getItem("rl-presets");
+    const presets = presetsStr ? JSON.parse(presetsStr) : [];
+    const characters = presets.map((p: any) => ({ id: p.id, name: p.name }));
+
+    const activeCharacterId = localStorage.getItem("rl-active-preset-id") ?? "";
+    const activeModelPath = localStorage.getItem("rl-active-model") ?? "";
+
+    let models: { id: string; name: string }[] = [];
+    try {
+        const resp = await fetch(`${SIDECAR_URL}/api/live2d/models`);
+        if (resp.ok) {
+            const raw = await resp.text();
+            console.log("[syncTrayMenu] API 原始响应:", raw); // ← 问题3调试用
+            const data = JSON.parse(raw);
+            models = data.models.map((m: any) => ({ id: m.path, name: m.display_name }));
+        } else {
+            console.warn("[syncTrayMenu] API 返回非 200:", resp.status);
         }
+    } catch (e) {
+        console.warn("[syncTrayMenu] fetch 失败:", e);
     }
 
-    // ── 便捷窗口操作（保持在 App.vue 层，逻辑极简不值得单独 composable） ─
-    async function openSettings() { await invoke("open_settings"); }
-    async function openHistory() { await invoke("open_history"); }
+    try {
+        await invoke("update_menu_data", {
+            characters,
+            models,
+            activeCharacterId,
+            activeModelPath,
+        });
+        console.log(`[syncTrayMenu] 同步完成: ${characters.length} 角色 / ${models.length} 模型 | 激活角色=${activeCharacterId} 激活模型=${activeModelPath}`);
+    } catch (e) {
+        console.error("[syncTrayMenu] invoke 失败:", e);
+    }
+}
 
-    // ── 生命周期 ──────────────────────────────────────────────────────
-    const unlisten: (() => void)[] = [];
+// ── 便捷窗口操作 ───────────────────────────────────────────────────────
+async function openSettings() { await invoke("open_settings"); }
+async function openHistory() { await invoke("open_history"); }
 
-    onMounted(async () => {
-        console.time("[⏱ onMounted 总耗时]");
-        connectWS();
+// ── 生命周期 ───────────────────────────────────────────────────────────
+const unlisten: (() => void)[] = [];
 
-        const [,, ...unlisteners] = await Promise.all([
-            (async () => {
-                console.time("[⏱ initWindowPosition]");
-                await initWindowPosition();
-                console.timeEnd("[⏱ initWindowPosition]");
-            })(),
-            (async () => {
-                console.time("[⏱ initLive2D]");
-                await initLive2D();
-                console.timeEnd("[⏱ initLive2D]");
-            })(),
-            // listen("config-changed", (e) => {
-            //     const payload = e.payload as {
-            //         llm?: object; character?: object;
-            //         memory_window?: number; character_id?: string; vision?: object;
-            //     };
-            //     sendConfigure(payload);
-            // }),
-            // listen("mascot-hover", (e) => {
-            //     showUnlock.value = e.payload as boolean;
-            // }),
-            // listen("open-settings", async () => {
-            //     await invoke("open_settings");
-            // }),
-            // listen("model-changed", async (e) => {
-            //     const path = (e.payload as { path: string }).path;
-            //     await reloadLive2D(path);
-            // }),
-        ]);
+const onStorageChange = (e: StorageEvent) => {
+    if (e.key === "rl-presets") {
+        console.log("[App] presets 变更检测到，重新同步托盘");
+        syncTrayMenu();
+        }
+    };
 
-        unlisten.push(...unlisteners);
-        console.timeEnd("[⏱ onMounted 总耗时]");
-        // Tauri 事件监听
-        unlisten.push(await listen("config-changed", (e) => {
-            const payload = e.payload as {
-                llm?: object;
-                character?: object;
-                memory_window?: number;
-                character_id?: string;
-                vision?: object;
-                // [FIX] 新增尺寸预设字段，由 SettingsApp.vue 在保存时填入
-                size_preset?: "small" | "medium" | "large";
-            };
+onMounted(async () => {
+    console.time("[⏱ onMounted 总耗时]");
+    connectWS();
 
-            // [FIX] 尺寸切换：直接更新 sizePreset ref，
-            // BASE_W/INPUT_W 等 computed 会自动联动，
-            // useWindowManager 内部的 watch(BASE_W) 会触发 resizeToFit()
-            if (payload.size_preset) {
-                sizePreset.value = payload.size_preset;
-            }
+    // 并行：窗口位置初始化 + Live2D 初始化
+    await Promise.all([
+        (async () => {
+            console.time("[⏱ initWindowPosition]");
+            await initWindowPosition();
+            console.timeEnd("[⏱ initWindowPosition]");
+        })(),
+        (async () => {
+            console.time("[⏱ initLive2D]");
+            await initLive2D();
+            console.timeEnd("[⏱ initLive2D]");
+        })(),
+    ]);
 
-            sendConfigure(payload);
-        }));
+    // 后端就绪后同步托盘（延迟 2s 确保 sidecar 已启动）
+    setTimeout(syncTrayMenu, 2000);
 
-        unlisten.push(await listen("mascot-hover", (e) => {
-            showUnlock.value = e.payload as boolean;
-        }));
+    // ── Tauri 事件监听 ─────────────────────────────────────────────
+    unlisten.push(await listen("config-changed", (e) => {
+        const payload = e.payload as {
+            llm?: object;
+            character?: object;
+            memory_window?: number;
+            character_id?: string;
+            vision?: object;
+            size_preset?: "small" | "medium" | "large";
+        };
+        if (payload.size_preset) {
+            sizePreset.value = payload.size_preset;
+        }
+        sendConfigure(payload);
+        // 配置变更时重新同步（如角色增删、模型增删）
+        syncTrayMenu();
+    }));
 
-        unlisten.push(await listen("open-settings", async () => {
-            await invoke("open_settings");
-        }));
+    // 托盘：切换角色
+    unlisten.push(await listen<string>("tray-switch-character", (e) => {
+    const targetId = e.payload;
+    const presets = JSON.parse(localStorage.getItem("rl-presets") || "[]");
+    const target = presets.find((p: any) => p.id === targetId);
+    if (target) {
+        const charCfg = {
+            name: target.name, identity: target.identity,
+            personality: target.personality, address: target.address,
+            style: target.style, examples: target.examples,
+        };
+        localStorage.setItem("rl-character", JSON.stringify(charCfg));
+        localStorage.setItem("rl-active-preset-id", targetId);
+        sendConfigure({ character: charCfg, character_id: targetId });
+        showBubbleWithText(`已切换角色：${target.name}`);
+        syncTrayMenu(); // ← 新增：更新勾选
+        console.log(`[App] 托盘切换角色: ${target.name}`);
+        }
+    }));
 
-        unlisten.push(await listen("model-changed", async (e) => {
-            const path = (e.payload as { path: string }).path;
-            await reloadLive2D(path);
-        }));
+    // 托盘：切换模型
+    unlisten.push(await listen<string>("tray-switch-model", async (e) => {
+        const targetPath = e.payload;
+        localStorage.setItem("rl-active-model", targetPath); // ← 新增：持久化激活状态
+        await reloadLive2D(targetPath);
+        showBubbleWithText("模型已切换");
+        console.log(`[App] 托盘切换模型: ${targetPath}`);
+        // 勾选已在 Rust 侧立即更新，无需再调 syncTrayMenu
+    }));    
 
-        // Live2D 初始化（最后执行，不阻塞上方逻辑）
-        await initLive2D();
-    });
+    // 托盘：静音 / 取消静音（前端音频层控制，不影响后端 TTS 生成）
+    unlisten.push(await listen<boolean>("toggle-mute", (e) => {
+        isMuted.value = e.payload;
+        if (isMuted.value) stopTTS(); // 立即停止当前正在播放的音频
+        console.log(`[App] 静音状态: ${isMuted.value}`);
+    }));
 
-    onUnmounted(() => {
-        disconnectWS();
-        unlisten.forEach(fn => fn());
-        disposeLive2D();
-        destroyTTS();
-    });
+    // 托盘：重置位置（Rust 已完成 center，前端清除保存的锚点防止重启后恢复旧位置）
+    unlisten.push(await listen("reset-position", () => {
+        localStorage.removeItem("mascot-anchor");
+        console.log("[App] 窗口锚点已清除，位置已重置");
+    }));
+
+    unlisten.push(await listen("mascot-hover", (e) => {
+        showUnlock.value = e.payload as boolean;
+    }));
+
+    unlisten.push(await listen("open-settings", async () => {
+        await invoke("open_settings");
+    }));
+
+    unlisten.push(await listen("model-changed", async (e) => {
+        const path = (e.payload as { path: string }).path;
+        localStorage.setItem("rl-active-model", path); // ← 新增
+        await reloadLive2D(path);
+        syncTrayMenu(); // 通知 Rust 侧更新勾选
+    }));
+    
+    window.addEventListener("storage", onStorageChange);
+
+    console.timeEnd("[⏱ onMounted 总耗时]");
+});
+
+onUnmounted(() => {
+    window.removeEventListener("storage", onStorageChange);
+    disconnectWS();
+    unlisten.forEach(fn => fn());
+    disposeLive2D();
+    destroyTTS();
+});
 </script>
 
 <template>
     <div class="mascot-root"
-         :style="{
-             '--mascot-w': sizeConfig.baseW  + 'px',
-             '--mascot-h': sizeConfig.baseH  + 'px',
-             '--input-w':  sizeConfig.inputW  + 'px',
-             '--bubble-h': sizeConfig.bubbleH + 'px',
-         }">
+        @contextmenu.prevent="handleContextMenu"
+        :style="{
+            '--mascot-w': sizeConfig.baseW  + 'px',
+            '--mascot-h': sizeConfig.baseH  + 'px',
+            '--input-w':  sizeConfig.inputW  + 'px',
+            '--bubble-h': sizeConfig.bubbleH + 'px',
+        }">
 
         <!-- 气泡 -->
         <transition name="bubble">
@@ -194,7 +298,7 @@
                               v-model="userInput"
                               class="chat-input"
                               placeholder="说点什么…"
-                              rows="3"
+                              rows="4"
                               :disabled="!isConnected || isThinking"
                               @keydown="handleKeydown" />
                     <button class="send-btn"
@@ -245,6 +349,22 @@
                 <div class="status-dot" :class="{ connected: isConnected }"></div>
             </div>
         </div>
+        <!-- 右键上下文菜单 -->
+        <Transition name="ctxmenu">
+            <div v-if="contextMenuVisible"
+                class="context-menu"
+                :style="{ left: contextMenuX + 'px', top: contextMenuY + 'px' }"
+                @click.stop>
+                <div v-if="isDev" class="ctx-item" @click="openDevTools">
+                    🔍 打开开发者工具
+                </div>
+            </div>
+        </Transition>
+        <!-- 点击其他区域关闭菜单 -->
+        <div v-if="contextMenuVisible"
+            class="context-menu-mask"
+            @click="closeContextMenu"
+            @contextmenu.prevent="closeContextMenu" />
     </div>
 </template>
 
@@ -492,9 +612,10 @@
     .input-panel {
         position: absolute;
         right: var(--mascot-w, 280px);
-        bottom: 0;
+        top: 50%;
+        transform: translateY(-50%);
         width: var(--input-w, 240px);
-        height: var(--mascot-h, 380px);
+        height: auto;
         background: var(--clr-panel-bg);
         border: 1.5px solid var(--clr-bubble-bd);
         border-radius: 14px 14px 14px 14px;
@@ -669,4 +790,48 @@
         opacity: 0;
         transform: translateX(-10px);
     }
+
+    /* ── 右键上下文菜单 ─────────────────────────────────────────── */
+    .context-menu-mask {
+        position: fixed;
+        inset: 0;
+        z-index: 998;
+    }
+
+    .context-menu {
+        position: fixed;
+        z-index: 999;
+        background: rgba(255, 255, 255, 0.92);
+        border: 1px solid rgba(126, 87, 194, 0.2);
+        border-radius: 8px;
+        padding: 4px 0;
+        min-width: 160px;
+        backdrop-filter: blur(12px);
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+        pointer-events: all;
+    }
+
+    .ctx-item {
+        padding: 7px 14px;
+        font-size: 12px;
+        color: var(--clr-text);
+        cursor: pointer;
+        transition: background 0.15s;
+        white-space: nowrap;
+    }
+
+    .ctx-item:hover {
+        background: rgba(126, 87, 194, 0.1);
+    }
+
+    .ctxmenu-enter-active,
+    .ctxmenu-leave-active {
+        transition: opacity 0.12s ease, transform 0.12s ease;
+    }
+
+    .ctxmenu-enter-from,
+    .ctxmenu-leave-to {
+        opacity: 0;
+        transform: scale(0.95);
+}
 </style>
