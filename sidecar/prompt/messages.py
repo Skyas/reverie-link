@@ -8,15 +8,23 @@ prompt/messages.py — LLM messages 列表组装
   build_multimodal_screenshot_messages() — 多模态直传（图片嵌入消息体）
   build_vision_speech_messages()        — 视觉感知主动发言
 
+【2026-04-13 修改】
+  ★ 重新引入 history 过滤（与避免重复区配套）
+    上一版尝试"history 完整保留 + 系统末尾避免重复区"双管齐下，
+    实测发现：避免重复区作为 system 内的负向约束，敌不过 history 里
+    同名 assistant turn 给自回归模型的延续诱导（最近的 assistant
+    消息是模型最强的延续信号）。日志中 #4#5 同一句长度 13 的台词
+    背靠背出现 → 第三轮再次复读，就是这条诱导链路的铁证。
+
+    新方案 = 避免重复区（信息保留）+ history 过滤（诱导消除）：
+      · 避免重复区在 system 末尾告诉模型"你刚说过 A B C"
+      · history 里不再以 assistant role 形式呈现这些话
+      · 两者必须配套，缺一不可
+
+    _source 标记继续写入 —— 既供避免重复区扫描，未来从 DB 重建
+    history 时也作为还原依据。
+
 【2026-04-09 修改】
-  ★ 核心修复：废弃 history 过滤，改为「避免重复区」注入
-    1. history 不再因 _source=="vision_proactive" 被过滤
-       —— 完整保留窗口轮数内的全部历史，记忆联通彻底打通
-       —— 这彻底解决了"模型看不到自己刚说过什么导致复读"的根因
-    2. 新增「避免重复区」：扫描最近 10 分钟内的 vision_proactive turn，
-       提取 content 单独列出，明确告知"严禁重复以下话题"
-       —— 用负向约束代替过滤，模型既知道自己说过什么，又不会被当成 few-shot
-    3. _source 标记仍然保留 —— 供"避免重复区"扫描使用
   ★ 补 print 临时日志，前缀 [PromptBuild]
     —— 待统一整改 logging 后改为 logger.xxx
 """
@@ -324,14 +332,12 @@ def build_vision_speech_messages(
     """
     构造视觉主动发言的 messages。
 
-    【2026-04-09 核心修复】
-      ★ 不再过滤 history 中的 vision_proactive turn
-        —— 配置的窗口轮数内的全部历史完整保留，记忆联通彻底打通
-        —— 这彻底解决了"模型看不到自己刚说过什么导致独立地反复想到同一件事"的根因
-      ★ 新增「避免重复区」注入
-        —— 扫描最近 10 分钟内的 vision_proactive turn，把 content 单独列出
-        —— 明确措辞为"严禁重复以下话题"，用负向约束代替 few-shot 暴露
-        —— 模型既知道自己刚说过什么，又不会被当成示范而模仿
+    【2026-04-13 修复】history 过滤 + 避免重复区 双管齐下
+      · history 中 _source=="vision_proactive" 的 assistant turn 被过滤
+        —— 不再以 assistant role 形式诱导模型延续/复读
+      · 同时在 system 末尾保留「避免重复区」
+        —— 用负向约束告知模型"你最近说过 A B C，严禁重复"
+        —— 信息保留 + 诱导消除，两者缺一不可
     """
     scene_info   = trigger.get("scene_info", {})
     ctx_prompt   = trigger.get("context_prompt", "")
@@ -427,18 +433,24 @@ def build_vision_speech_messages(
 
     messages = [{"role": "system", "content": full_system}]
 
-    # ── 【核心修改】history 完整传入，不再过滤 vision_proactive ──────
-    # 旧版本会过滤掉 _source=="vision_proactive" 的 assistant turn，
-    # 这导致模型完全看不到自己 4 分钟前刚说过"主人今天还没亲我"，
-    # 在几乎相同的视觉上下文 + 几乎相同的内心状态下，自然产出几乎相同的话。
-    # 新版本：trim_history 按用户配置的窗口裁剪，裁剪后的内容原样传入，
-    # 让模型对自己最近的发言有完整的上下文感知。
+    # ── 【核心修改 2026-04-13】重新引入 vision_proactive 过滤 ─────────
+    # 上一版"history 完整传入"导致 history 里同一句台词作为 assistant
+    # role 出现 → 强烈诱导模型复读（避免重复区敌不过 assistant 历史的
+    # 延续信号）。
+    # 现在的做法：
+    #   · 保留 _source 标记的 assistant turn 用于避免重复区扫描（已在上面完成）
+    #   · 但在传给 LLM 的 messages 里，从 history 中剔除这些 turn
+    # 这样模型既能从 system 末尾知道"我刚说过什么"（信息保留），
+    # 又不会被 assistant 历史诱导继续吐同样的话（诱导消除）。
     if history:
-        trimmed = trim_history(history, window_index)
+        filtered = [m for m in history if m.get("_source") != "vision_proactive"]
+        trimmed = trim_history(filtered, window_index) if filtered else []
         clean = [{"role": m["role"], "content": m["content"]} for m in trimmed]
         messages.extend(clean)
+        filtered_out = len(history) - len(filtered)
     else:
         trimmed = []
+        filtered_out = 0
 
     messages.append({
         "role": "user",
@@ -448,7 +460,8 @@ def build_vision_speech_messages(
     # ── 临时 print 日志：完整记录这次组装的全貌 ─────────────────────
     print(
         f"[PromptBuild] build_vision_speech_messages | "
-        f"history_in={len(history)} history_trimmed={len(trimmed)} "
+        f"history_in={len(history)} history_filtered_out={filtered_out} "
+        f"history_trimmed={len(trimmed)} "
         f"messages_out={len(messages)} system_len={len(full_system)} "
         f"avoid_repeat_count={len(recent_speeches)} "
         f"scene={scene_type} game={game_name} confidence={confidence} reason={reason}",
