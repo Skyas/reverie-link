@@ -38,6 +38,10 @@ const llm = reactive({
     model:    "deepseek-chat",
     editable: false,
     needKey:  true,
+    // 【新增】LLM 采样参数
+    temperature: 0.8,
+    top_p: 0.9,
+    frequency_penalty: 0.5
 });
 
 const currentKey = computed({
@@ -74,6 +78,10 @@ async function saveLLM() {
         base_url: llm.base_url,
         model:    llm.model,
         api_key:  apiKeys[llm.vendor] ?? "",
+        // 【新增】保存采样参数
+        temperature: llm.temperature,
+        top_p: llm.top_p,
+        frequency_penalty: llm.frequency_penalty
     };
     localStorage.setItem("rl-llm", JSON.stringify(cfg));
     emit("llm-saved", cfg);
@@ -141,6 +149,9 @@ onMounted(() => {
         llm.vendor   = d.vendor   ?? "DeepSeek";
         llm.base_url = d.base_url ?? llm.base_url;
         llm.model    = d.model    ?? llm.model;
+        llm.temperature = d.temperature ?? 0.8;
+        llm.top_p = d.top_p ?? 0.9;
+        llm.frequency_penalty = d.frequency_penalty ?? 0.5;
         const preset = VENDORS.find(v => v.name === llm.vendor);
         llm.editable = preset?.editable ?? true;
         llm.needKey  = preset?.needKey  ?? true;
@@ -196,6 +207,40 @@ onMounted(() => {
             <label class="field-label">模型名称</label>
             <input class="field-input" v-model="llm.model" placeholder="例如：deepseek-chat" />
         </div>
+
+        <div class="divider"></div>
+        <div class="global-section-title" style="margin-bottom:8px;">🧠 核心性格微调</div>
+
+        <div class="field-group">
+            <label class="field-label">🎨 脑洞大小 (Temperature): {{ llm.temperature.toFixed(2) }}</label>
+            <input type="range" min="0" max="2" step="0.05" v-model.number="llm.temperature" class="field-slider" />
+            <div class="field-hint" style="display: flex; justify-content: space-between; margin-top: 4px;">
+                <span>👈 小</span>
+                <span style="color: var(--c-text-soft);">日常推荐 0.85</span>
+                <span>大 👉</span>
+            </div>
+        </div>
+
+        <div class="field-group">
+            <label class="field-label">📖 词汇量 (Top P): {{ llm.top_p.toFixed(2) }}</label>
+            <input type="range" min="0" max="1" step="0.05" v-model.number="llm.top_p" class="field-slider" />
+            <div class="field-hint" style="display: flex; justify-content: space-between; margin-top: 4px;">
+                <span>👈 少</span>
+                <span style="color: var(--c-text-soft);">日常推荐 0.90</span>
+                <span>多 👉</span>
+            </div>
+        </div>
+
+        <div class="field-group">
+            <label class="field-label">🔀 复读机程度 (Freq Penalty): {{ llm.frequency_penalty.toFixed(2) }}</label>
+            <input type="range" min="0" max="1" step="0.05" v-model.number="llm.frequency_penalty" class="field-slider" />
+            <div class="field-hint" style="display: flex; justify-content: space-between; margin-top: 4px;">
+                <span>👈 人类本质</span>
+                <span style="color: var(--c-text-soft);">日常推荐 0.50</span>
+                <span>不准复读 👉</span>
+            </div>
+        </div>
+
         <div class="action-row">
             <button class="save-btn" @click="saveLLM">保存配置</button>
         </div>
@@ -361,4 +406,11 @@ onMounted(() => {
 .toast-leave-active { transition: opacity 0.2s ease; }
 .toast-enter-from { opacity: 0; transform: translateX(-50%) translateY(-10px); }
 .toast-leave-to   { opacity: 0; }
+
+.field-slider {
+    width: 100%;
+    margin-top: 4px;
+    cursor: pointer;
+    accent-color: var(--c-blue);
+}
 </style>

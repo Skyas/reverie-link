@@ -96,23 +96,23 @@
                 await initLive2D();
                 console.timeEnd("[⏱ initLive2D]");
             })(),
-            listen("config-changed", (e) => {
-                const payload = e.payload as {
-                    llm?: object; character?: object;
-                    memory_window?: number; character_id?: string; vision?: object;
-                };
-                sendConfigure(payload);
-            }),
-            listen("mascot-hover", (e) => {
-                showUnlock.value = e.payload as boolean;
-            }),
-            listen("open-settings", async () => {
-                await invoke("open_settings");
-            }),
-            listen("model-changed", async (e) => {
-                const path = (e.payload as { path: string }).path;
-                await reloadLive2D(path);
-            }),
+            // listen("config-changed", (e) => {
+            //     const payload = e.payload as {
+            //         llm?: object; character?: object;
+            //         memory_window?: number; character_id?: string; vision?: object;
+            //     };
+            //     sendConfigure(payload);
+            // }),
+            // listen("mascot-hover", (e) => {
+            //     showUnlock.value = e.payload as boolean;
+            // }),
+            // listen("open-settings", async () => {
+            //     await invoke("open_settings");
+            // }),
+            // listen("model-changed", async (e) => {
+            //     const path = (e.payload as { path: string }).path;
+            //     await reloadLive2D(path);
+            // }),
         ]);
 
         unlisten.push(...unlisteners);
@@ -497,7 +497,7 @@
         height: var(--mascot-h, 380px);
         background: var(--clr-panel-bg);
         border: 1.5px solid var(--clr-bubble-bd);
-        border-radius: 14px 14px 4px 14px;
+        border-radius: 14px 14px 14px 14px;
         backdrop-filter: blur(16px);
         -webkit-backdrop-filter: blur(16px);
         box-shadow: -2px 4px 16px rgba(126, 87, 194, 0.12);
