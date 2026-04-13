@@ -276,6 +276,25 @@ async def websocket_chat(websocket: WebSocket):
 
                 if "character_id" in data:
                     new_cid = str(data["character_id"]).strip()
+                    # 【2026-04-13 修复】切换角色时清空当前会话的 in-memory 历史
+                    # 避免上一个角色的 assistant turn（特别是 vision_proactive 标记的）
+                    # 被新角色"继承"，导致避免重复区扫到上一个角色的台词、
+                    # 或新角色看到上一个角色口吻的历史而被诱导。
+                    # 注意：数据库中的消息按 character_id 隔离，本次清空仅作用于
+                    # 当前 WebSocket 连接持有的 in-memory deque/list，
+                    # 不影响数据库中已落库的历史消息。
+                    # TODO(Step B): 这里应改为"清空 + 从 DB 加载新角色最近 N 条消息重建 history"
+                    #   让用户切换角色或重启程序后，新角色仍能记得自己最近发生过什么。
+                    if new_cid and new_cid != session_character_id:
+                        cleared_history = len(history)
+                        cleared_msgs = len(session_messages)
+                        history.clear()
+                        session_messages.clear()
+                        print(
+                            f"[Configure] 角色切换 {session_character_id!r} → {new_cid!r} "
+                            f"| 清空 history={cleared_history} session_messages={cleared_msgs}",
+                            flush=True,
+                        )
                     current_character_id = new_cid
                     session_character_id = new_cid
 
