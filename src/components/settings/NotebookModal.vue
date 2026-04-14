@@ -55,6 +55,7 @@ const entryTagsRaw   = ref("");
 // ── 数据获取 ───────────────────────────────────────────────────
 async function fetchManualEntries(page: number) {
     loading.value = true;
+    console.debug("[NotebookModal] fetchManualEntries: page=%s keyword='%s'", page, manualKeyword.value);
     try {
         const params = new URLSearchParams({
             source: "manual", page: String(page), page_size: "10",
@@ -64,18 +65,25 @@ async function fetchManualEntries(page: number) {
             params.set("keyword",   manualKeyword.value.trim());
             params.set("search_by", manualSearchBy.value);
         }
-        const data = await fetch(`http://localhost:18000/api/notebook/entries?${params}`).then(r => r.json());
+        const res = await fetch(`http://localhost:18000/api/notebook/entries?${params}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
         manualEntries.value    = data.items        ?? [];
         manualTotal.value      = data.total        ?? 0;
         manualPage.value       = data.page         ?? 1;
         manualTotalPages.value = data.total_pages  ?? 1;
         manualJumpPage.value   = manualPage.value;
-    } catch { showMsg("获取备忘录失败，请确认后端已启动", "warn"); }
+        console.debug("[NotebookModal] fetchManualEntries: 获取到 %s 条 total=%s", manualEntries.value.length, manualTotal.value);
+    } catch (e) {
+        console.error("[NotebookModal] fetchManualEntries: 失败", e);
+        showMsg("获取备忘录失败，请确认后端已启动", "warn");
+    }
     finally   { loading.value = false; }
 }
 
 async function fetchAutoEntries(page: number) {
     loading.value = true;
+    console.debug("[NotebookModal] fetchAutoEntries: page=%s keyword='%s'", page, autoKeyword.value);
     try {
         const params = new URLSearchParams({
             source: "auto", page: String(page), page_size: "10",
@@ -85,19 +93,26 @@ async function fetchAutoEntries(page: number) {
             params.set("keyword",   autoKeyword.value.trim());
             params.set("search_by", autoSearchBy.value);
         }
-        const data = await fetch(`http://localhost:18000/api/notebook/entries?${params}`).then(r => r.json());
+        const res = await fetch(`http://localhost:18000/api/notebook/entries?${params}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
         autoEntries.value    = data.items        ?? [];
         autoTotal.value      = data.total        ?? 0;
         autoPage.value       = data.page         ?? 1;
         autoTotalPages.value = data.total_pages  ?? 1;
         autoJumpPage.value   = autoPage.value;
-    } catch { showMsg("获取日记本失败，请确认后端已启动", "warn"); }
+        console.debug("[NotebookModal] fetchAutoEntries: 获取到 %s 条 total=%s", autoEntries.value.length, autoTotal.value);
+    } catch (e) {
+        console.error("[NotebookModal] fetchAutoEntries: 失败", e);
+        showMsg("获取日记本失败，请确认后端已启动", "warn");
+    }
     finally   { loading.value = false; }
 }
 
 // 弹窗打开时重置并加载
 watch(() => props.visible, async (val) => {
     if (!val) return;
+    console.debug("[NotebookModal] visible=true，重置并加载数据");
     notebookTab.value = "manual";
     manualKeyword.value = ""; autoKeyword.value = "";
     await fetchManualEntries(1);
@@ -106,6 +121,7 @@ watch(() => props.visible, async (val) => {
 
 // ── 条目操作 ───────────────────────────────────────────────────
 function openNewEntry() {
+    console.debug("[NotebookModal] openNewEntry");
     editingEntryId.value = null;
     entryContent.value   = "";
     entryTagsRaw.value   = "";
@@ -113,6 +129,7 @@ function openNewEntry() {
 }
 
 function openEditEntry(entry: NotebookEntry) {
+    console.debug("[NotebookModal] openEditEntry: id=%s", entry.id);
     editingEntryId.value = entry.id;
     entryContent.value   = entry.content;
     entryTagsRaw.value   = entry.tags.join("、");
@@ -123,32 +140,44 @@ async function saveEntry() {
     const content = entryContent.value.trim();
     if (!content) { showMsg("内容不能为空", "warn"); return; }
     const tags = entryTagsRaw.value.split(/[,，、]/).map(t => t.trim()).filter(Boolean);
+    const isEdit = !!editingEntryId.value;
+    console.info("[NotebookModal] saveEntry: %s id=%s tags=%s", isEdit ? "更新" : "新建", editingEntryId.value, tags);
     try {
         if (editingEntryId.value) {
-            await fetch(`http://localhost:18000/api/notebook/entries/${editingEntryId.value}`, {
+            const res = await fetch(`http://localhost:18000/api/notebook/entries/${editingEntryId.value}`, {
                 method: "PUT", headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ content, tags }),
             });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
             showMsg("✓ 已更新");
         } else {
-            await fetch("http://localhost:18000/api/notebook/entries", {
+            const res = await fetch("http://localhost:18000/api/notebook/entries", {
                 method: "POST", headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ content, tags, character_id: props.characterId }),
             });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
             showMsg("✓ 已添加");
         }
         showEntryForm.value = false;
         await fetchManualEntries(manualPage.value);
-    } catch { showMsg("操作失败", "warn"); }
+    } catch (e) {
+        console.error("[NotebookModal] saveEntry: 失败", e);
+        showMsg("操作失败", "warn");
+    }
 }
 
 async function deleteEntry(id: string, source: "manual" | "auto") {
+    console.info("[NotebookModal] deleteEntry: id=%s source=%s", id, source);
     try {
-        await fetch(`http://localhost:18000/api/notebook/entries/${id}`, { method: "DELETE" });
+        const res = await fetch(`http://localhost:18000/api/notebook/entries/${id}`, { method: "DELETE" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         showMsg("已删除");
         if (source === "manual") await fetchManualEntries(manualPage.value);
         else                     await fetchAutoEntries(autoPage.value);
-    } catch { showMsg("删除失败", "warn"); }
+    } catch (e) {
+        console.error("[NotebookModal] deleteEntry: 失败", e);
+        showMsg("删除失败", "warn");
+    }
 }
 
 // ── 搜索 & 跳页 ────────────────────────────────────────────────

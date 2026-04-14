@@ -11,6 +11,9 @@ import asyncio
 import json
 import uuid
 from pathlib import Path
+import logging
+logger = logging.getLogger(__name__)
+
 
 import httpx
 from fastapi import APIRouter
@@ -154,7 +157,7 @@ async def tts_local(body: dict):
         )
         _, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
         if proc.returncode != 0:
-            print(f"[RVC] 推理失败: {stderr.decode(errors='replace')[:300]}")
+            logger.error("[RVC] 推理失败: %s", stderr.decode(errors="replace")[:300])
             return Response(
                 content=json.dumps({"error": "RVC 推理失败"}, ensure_ascii=False),
                 status_code=500, media_type="application/json",

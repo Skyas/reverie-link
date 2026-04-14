@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -263,7 +264,14 @@ async def summarize_and_store(
         return False
 
     # 调用 LLM 生成摘要
+    t0 = time.time()
     prompt = _build_summary_prompt(character, records_text)
+    logger.info(
+        "[VectorStore] 摘要 LLM 调用 | session=%s record_count=%s time_span=%s",
+        session_id, len(dialog),
+        f"{dialog[0].created_at:%Y-%m-%d}→{dialog[-1].created_at:%Y-%m-%d}" if dialog else "N/A",
+    )
+    logger.debug("[VectorStore]   摘要 prompt: %r", prompt[:200])
     try:
         resp = await llm_client.chat.completions.create(
             model=model,
@@ -272,8 +280,14 @@ async def summarize_and_store(
             temperature=0.4,
         )
         summary_text = resp.choices[0].message.content.strip()
+        elapsed = time.time() - t0
+        logger.info(
+            "[VectorStore] 摘要 LLM 原始输出 | session=%s len=%s elapsed=%.2fs | %r",
+            session_id, len(summary_text), elapsed, summary_text,
+        )
     except Exception as e:
-        logger.error(f"[VectorStore] 摘要生成失败（session={session_id}）: {e}")
+        elapsed = time.time() - t0
+        logger.error("[VectorStore] 摘要 LLM 失败 | session=%s elapsed=%.2fs: %s", session_id, elapsed, e)
         return False
 
     if not summary_text:

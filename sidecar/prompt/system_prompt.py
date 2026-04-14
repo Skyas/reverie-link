@@ -18,6 +18,8 @@ prompt/system_prompt.py — System Prompt 组装
 import sys
 import os
 from datetime import datetime
+import logging
+logger = logging.getLogger(__name__)
 
 # 允许从本模块访问 memory 子包（memory/ 与 prompt/ 同在 sidecar/ 下）
 _SIDECAR_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -97,11 +99,7 @@ def build_system_prompt(character: dict) -> str:
     full_prompt = "\n".join(parts)
 
     # ── 临时 print 日志（待 logging 整改时改为 logger.debug）────────
-    print(
-        f"[SystemPrompt] build_system_prompt 完成 | name={name} "
-        f"length={len(full_prompt)} examples={len(examples)}",
-        flush=True,
-    )
+    logger.info("[SystemPrompt] build_system_prompt 完成 | name=%s length=%s examples=%s", name, len(full_prompt), len(examples))
 
     return full_prompt
 
@@ -146,12 +144,8 @@ def _build_memory_layer(
         parts.append(f"【{name}的回忆片段】\n" + "\n".join(lines))
 
     # ── 临时 print 日志 ─────────────────────────────────────────────
-    print(
-        f"[SystemPrompt] _build_memory_layer | character_id={character_id} "
-        f"notebook_entries={notebook_count} vector_summaries={len(relevant_summaries or [])} "
-        f"notebook_error={notebook_error}",
-        flush=True,
-    )
+    logger.debug("[SystemPrompt] _build_memory_layer | character_id=%s notebook_entries=%s vector_summaries=%s notebook_error=%s",
+                 character_id, notebook_count, len(relevant_summaries or []), notebook_error)
 
     return "\n\n".join(parts)
 

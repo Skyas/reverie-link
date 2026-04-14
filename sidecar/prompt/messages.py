@@ -190,12 +190,7 @@ def build_messages(
     )
     messages.append({"role": "user", "content": user_message})
 
-    print(
-        f"[PromptBuild] build_messages | history_in={len(history)} "
-        f"messages_out={len(messages)} system_len={len(full_system)} "
-        f"user_len={len(user_message)} window_idx={window_index}",
-        flush=True,
-    )
+    logger.info("[PromptBuild] build_messages | history_in=%s messages_out=%s system_len=%s user_len=%s window_idx=%s", len(history), len(messages), len(full_system), len(user_message), window_index)
 
     return messages
 
@@ -235,11 +230,7 @@ def build_screenshot_messages(
 
     messages.append({"role": "user", "content": combined_user_msg})
 
-    print(
-        f"[PromptBuild] build_screenshot_messages | history_in={len(history)} "
-        f"messages_out={len(messages)} scene={scene_type} game={game_name} confidence={confidence}",
-        flush=True,
-    )
+    logger.info("[PromptBuild] build_screenshot_messages | history_in=%s messages_out=%s scene=%s game=%s confidence=%s", len(history), len(messages), scene_type, game_name, confidence)
 
     return messages
 
@@ -274,11 +265,7 @@ def build_multimodal_screenshot_messages(
         ],
     })
 
-    print(
-        f"[PromptBuild] build_multimodal_screenshot_messages | history_in={len(history)} "
-        f"messages_out={len(messages)} img_b64_len={len(img_b64)} window_title={window_title!r}",
-        flush=True,
-    )
+    logger.info("[PromptBuild] build_multimodal_screenshot_messages | history_in=%s messages_out=%s img_b64_len=%s window_title=%r", len(history), len(messages), len(img_b64), window_title)
 
     return messages
 
@@ -458,19 +445,10 @@ def build_vision_speech_messages(
     })
 
     # ── 临时 print 日志：完整记录这次组装的全貌 ─────────────────────
-    print(
-        f"[PromptBuild] build_vision_speech_messages | "
-        f"history_in={len(history)} history_filtered_out={filtered_out} "
-        f"history_trimmed={len(trimmed)} "
-        f"messages_out={len(messages)} system_len={len(full_system)} "
-        f"avoid_repeat_count={len(recent_speeches)} "
-        f"scene={scene_type} game={game_name} confidence={confidence} reason={reason}",
-        flush=True,
-    )
+    logger.info("[PromptBuild] build_vision_speech_messages | history_in=%s history_filtered_out=%s history_trimmed=%s messages_out=%s system_len=%s avoid_repeat_count=%s scene=%s game=%s confidence=%s reason=%s",
+                len(history), filtered_out, len(trimmed), len(messages), len(full_system),
+                len(recent_speeches), scene_type, game_name, confidence, reason)
     if recent_speeches:
-        print(
-            f"[PromptBuild] 避免重复区注入内容: {recent_speeches}",
-            flush=True,
-        )
+        logger.debug("[PromptBuild] 避免重复区注入内容: %s", recent_speeches)
 
     return messages

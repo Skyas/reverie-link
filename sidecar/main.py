@@ -11,6 +11,14 @@ FastAPI + WebSocket 主入口
   4. 关键位置加 logger 输出，方便测试定位
 """
 
+import os
+import sys
+# Setup logging FIRST so all sub-module loggers inherit root config
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from utils.logging_setup import setup_logging
+
+setup_logging()  # ← must be called before any module that uses logger
+
 import json
 import logging
 import os
@@ -49,6 +57,7 @@ from memory import (
     retrieve_relevant_summaries,
 )
 from vision.vision_system import VisionSystem
+from utils.logging_setup import setup_logging
 from utils.emotion import _extract_emotion
 from utils.dedup import is_degenerate_repetition
 from ws.vision_speech import _drain_vision_speech
@@ -86,6 +95,7 @@ vision_system: Optional[VisionSystem] = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global vision_system
+    setup_logging()
     init_memory_system()
     yield
     if vision_system:
@@ -153,15 +163,12 @@ async def websocket_chat(websocket: WebSocket):
     # 字段的 configure 消息后才会被设置，在此之前 VLM 选择逻辑无法感知主模型。
     try:
         vision_system.set_main_llm(llm_client, LLM_MODEL)
-        print(
-            f"[Configure] vision.set_main_llm 启动兜底同步 | model={LLM_MODEL}",
-            flush=True,
-        )
+        logger.info("[Configure] vision.set_main_llm 启动兜底同步 | model=%s", LLM_MODEL)
     except Exception as e:
-        print(f"[Configure] vision.set_main_llm 启动兜底同步失败: {e}", flush=True)
+        logger.warning("[Configure] vision.set_main_llm 启动兜底同步失败: %s", e)
 
     vision_system.start()
-    print("[后端状态] 前端已连接，视觉与键鼠监控服务：已唤醒 ✅")
+    logger.info("[后端状态] 前端已连接，视觉与键鼠监控服务：已唤醒 ✅")
 
     session_id           = generate_session_id()
     history: deque[dict] = deque(maxlen=_MAX_HISTORY_ITEMS)
@@ -245,9 +252,9 @@ async def websocket_chat(websocket: WebSocket):
                             api_key  = new_api_key if new_api_key else "no-key",
                             base_url = new_base_url,
                         )
-                        print(f"[Configure] LLM 已更新 | model={LLM_MODEL} base_url={new_base_url} has_key={bool(new_api_key)}", flush=True)
+                        logger.info("[Configure] LLM 已更新 | model=%s base_url=%s has_key=%s", LLM_MODEL, new_base_url, bool(new_api_key))
                     else:
-                        print(f"[Configure] model 已更新（无 base_url，跳过 client 重建）| model={LLM_MODEL}", flush=True)
+                        logger.info("[Configure] model 已更新（无 base_url，跳过 client 重建）| model=%s", LLM_MODEL)
 
                     # 【2026-04-09 Bug Fix】不论本次 configure 是否同时带 "vision" 字段，
                     # 只要 LLM 配置有更新，就立即把新的 client/model 同步给 vision 系统。
@@ -257,12 +264,9 @@ async def websocket_chat(websocket: WebSocket):
                     if vision_system:
                         try:
                             vision_system.set_main_llm(llm_client, LLM_MODEL)
-                            print(
-                                f"[Configure] vision.set_main_llm 已同步（随 LLM 更新）| model={LLM_MODEL}",
-                                flush=True,
-                            )
+                            logger.info("[Configure] vision.set_main_llm 已同步（随 LLM 更新）| model=%s", LLM_MODEL)
                         except Exception as e:
-                            print(f"[Configure] vision.set_main_llm 同步失败: {e}", flush=True)
+                            logger.error("[Configure] vision.set_main_llm 同步失败: %s", e)
 
                 if char_cfg:
                     current_character = {**DEFAULT_CHARACTER, **char_cfg}
@@ -290,11 +294,7 @@ async def websocket_chat(websocket: WebSocket):
                         cleared_msgs = len(session_messages)
                         history.clear()
                         session_messages.clear()
-                        print(
-                            f"[Configure] 角色切换 {session_character_id!r} → {new_cid!r} "
-                            f"| 清空 history={cleared_history} session_messages={cleared_msgs}",
-                            flush=True,
-                        )
+                        logger.info("[Configure] 角色切换 %r → %r | 清空 history=%s session_messages=%s", session_character_id, new_cid, cleared_history, cleared_msgs)
                     current_character_id = new_cid
                     session_character_id = new_cid
 
@@ -316,6 +316,10 @@ async def websocket_chat(websocket: WebSocket):
 
             if msg_type != "chat" or not user_msg:
                 continue
+
+            # ── Plan 4.4: 普通对话路径日志 ──────────────────────────
+            logger.info("[Chat] 收到用户消息 | session=%s msg_len=%s", session_id, len(user_msg))
+            logger.debug("[Chat]   消息内容: %r", user_msg[:200])
 
             if vision_system:
                 vision_system.on_user_message()
@@ -366,13 +370,26 @@ async def websocket_chat(websocket: WebSocket):
                     summary_queue.push(evicted_msgs)
                     del session_messages[:evicted_count]
 
+            # ── Plan 4.4: LLM 调用 ─────────────────────────────────
+            t0 = time.time()
+            logger.info(
+                "[Chat] LLM 调用 | model=%s temp=%.2f top_p=%.2f freq_pen=%.2f msgs=%s",
+                LLM_MODEL, LLM_TEMPERATURE, LLM_TOP_P, LLM_FREQ_PENALTY, len(messages),
+            )
             try:
                 response = await llm_client.chat.completions.create(
                     model=LLM_MODEL, messages=messages, max_tokens=300,
                     temperature=LLM_TEMPERATURE, top_p=LLM_TOP_P, frequency_penalty=LLM_FREQ_PENALTY
                 )
                 reply = response.choices[0].message.content.strip()
+                elapsed = time.time() - t0
+                logger.info(
+                    "[Chat] LLM 原始输出(主) | session=%s len=%s elapsed=%.2fs | %r",
+                    session_id, len(reply), elapsed, reply,
+                )
             except Exception as e:
+                elapsed = time.time() - t0
+                logger.error("[Chat] LLM 调用失败(主) | session=%s elapsed=%.2fs: %s", session_id, elapsed, e)
                 friendly = f"调用失败：{str(e)[:80]}"
                 await websocket.send_text(json.dumps({"type": "error", "message": friendly}, ensure_ascii=False))
                 continue
@@ -387,11 +404,16 @@ async def websocket_chat(websocket: WebSocket):
                             character_id=session_character_id, character_name=current_character.get("name", ""),
                             relevant_summaries=relevant,
                         )
+                        logger.info("[Chat] NEED_SCREENSHOT → 使用主模型多模态直传 | session=%s", session_id)
                         try:
                             r2 = await llm_client.chat.completions.create(model=LLM_MODEL, messages=msgs2, max_tokens=300, temperature=LLM_TEMPERATURE, top_p=LLM_TOP_P, frequency_penalty=LLM_FREQ_PENALTY)
                             reply = r2.choices[0].message.content.strip()
-                        except Exception:
-                            pass
+                            logger.info(
+                                "[Chat] LLM 原始输出(fallback直传) | session=%s len=%s | %r",
+                                session_id, len(reply), reply,
+                            )
+                        except Exception as e:
+                            logger.error("[Chat] NEED_SCREENSHOT fallback直传失败 | session=%s: %s", session_id, e)
                 else:
                     screenshot_info = await vision_system.capture_for_user()
                     if screenshot_info and not screenshot_info.get("error"):
@@ -400,18 +422,25 @@ async def websocket_chat(websocket: WebSocket):
                             window_index=session_window_index, character_id=session_character_id,
                             character_name=current_character.get("name", ""), relevant_summaries=relevant,
                         )
+                        logger.info("[Chat] NEED_SCREENSHOT → VLM中转路径 | session=%s", session_id)
                         try:
                             r2 = await llm_client.chat.completions.create(model=LLM_MODEL, messages=msgs2, max_tokens=300, temperature=LLM_TEMPERATURE, top_p=LLM_TOP_P, frequency_penalty=LLM_FREQ_PENALTY)
                             reply = r2.choices[0].message.content.strip()
-                        except Exception:
-                            pass
+                            logger.info(
+                                "[Chat] LLM 原始输出(fallback VLM中转) | session=%s len=%s | %r",
+                                session_id, len(reply), reply,
+                            )
+                        except Exception as e:
+                            logger.error("[Chat] NEED_SCREENSHOT VLM中转失败 | session=%s: %s", session_id, e)
 
             emotion = _extract_emotion(reply)
+            logger.debug("[Chat] 情感提取 | emotion=%s 原始=%r", emotion, reply[:80])
 
             # 标签清理（不再处理 event 标签）
             clean_reply = re.sub(r'\[(happy|sad|angry|shy|surprised|neutral|sigh)\]', '', reply, flags=re.IGNORECASE)
-            clean_reply = re.sub(r'\[NEED_SCREENSHOT\]', '', clean_reply, flags=re.IGNORECASE)
+            clean_reply = re.sub(r'\[NEED_SCREENSHOT\]', '', clean_reply)
             clean_reply = re.sub(r'\[[a-zA-Z_]+\]', '', clean_reply).strip()
+            logger.debug("[Chat] 清洗后内容: %r", clean_reply[:80])
 
             # ── 退化重复检测：降级为 "……" 发送，不污染下一轮 ─────────
             if is_degenerate_repetition(clean_reply):
@@ -475,11 +504,11 @@ async def websocket_chat(websocket: WebSocket):
                 vision_system.on_user_message_done()
 
     except WebSocketDisconnect:
-        print(f"[WS] 会话 {session_id} 断开（角色：{session_character_id}）")
+        logger.info("[WS] 会话 %s 断开（角色：%s）", session_id, session_character_id)
         await extractor.on_session_end(session_messages)
         summary_queue.flush_now()
 
         if vision_system:
             vision_system.stop()
             vision_system = None
-            print("[后端状态] 前端已断开，视觉与键鼠监控服务：已休眠 💤")
+            logger.info("[后端状态] 前端已断开，视觉与键鼠监控服务：已休眠 💤")

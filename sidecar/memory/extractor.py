@@ -37,7 +37,7 @@ from .db_notebook import (
     get_all_entries_for_prompt,
 )
 
-logger = logging.getLogger(__name__)  # 保留,整改后切回 logger.xxx
+logger = logging.getLogger(__name__)
 
 # ── 触发阈值 ──────────────────────────────────────────────────────
 EXTRACT_EVERY_N_ROUNDS: int = 10
@@ -177,7 +177,7 @@ async def _is_duplicate_by_llm(
         )
         return resp.choices[0].message.content.strip().startswith("是")
     except Exception as e:
-        print(f"[Extractor] ⚠ 去重精判失败(保守返回 False): {e}", flush=True)
+        logger.warning("[Extractor] ⚠ 去重精判失败(保守返回 False): %s", e)
         return False
 
 
@@ -196,7 +196,7 @@ async def _deduplicate(
         is_dup = False
         for candidate in candidates:
             if await _is_duplicate_by_llm(llm_client, model, new_content, candidate.content):
-                print(f"[Extractor]   去重丢弃: {new_content!r} ≈ {candidate.content!r}", flush=True)
+                logger.debug("[Extractor]   去重丢弃: %r ≈ %r", new_content, candidate.content)
                 is_dup = True
                 break
 
@@ -222,14 +222,17 @@ async def extract_and_save(
         m for m in recent_messages
         if m.type in (MessageType.USER_TEXT, MessageType.USER_VOICE, MessageType.AI_REPLY)
     ]
-    print(
-        f"[Extractor] ▶ extract_and_save | session={session_id} "
-        f"recent={len(recent_messages)} dialog={len(dialog_messages)} character={character_id!r}",
-        flush=True,
+    logger.info(
+        "[Extractor] ▶ extract_and_save | session=%s "
+        "recent=%d dialog=%d character=%r",
+        session_id,
+        len(recent_messages),
+        len(dialog_messages),
+        character_id,
     )
 
     if len(dialog_messages) < 2:
-        print(f"[Extractor] ✗ 对话消息不足 2 条,跳过", flush=True)
+        logger.info("[Extractor] ✗ 对话消息不足 2 条,跳过")
         return 0
 
     conversation_text = _format_conversations(dialog_messages)
@@ -249,16 +252,18 @@ async def extract_and_save(
         )
         raw_output = resp.choices[0].message.content.strip()
     except Exception as e:
-        print(f"[Extractor] ✗ LLM 提取失败 耗时={time.time()-t_llm:.2f}s: {e}", flush=True)
+        logger.error("[Extractor] ✗ LLM 提取失败 耗时=%s: %s", time.time()-t_llm, e)
         return 0
 
     # 关键:记录 LLM 原始完整输出(不清洗,按项目约定)
-    print(
-        f"[Extractor] 🤖 LLM 提取完成 耗时={time.time()-t_llm:.2f}s "
-        f"已有记忆={len(existing_entries)}条 prompt长度={len(prompt)}",
-        flush=True,
+    logger.info(
+        "[Extractor] 🤖 LLM 提取完成 耗时=%s "
+        "已有记忆=%d条 prompt长度=%d",
+        time.time()-t_llm,
+        len(existing_entries),
+        len(prompt),
     )
-    print(f"[Extractor]   LLM 原始输出: {raw_output!r}", flush=True)
+    logger.debug("[Extractor]   LLM 原始输出: %r", raw_output)
 
     if not raw_output:
         return 0
@@ -272,13 +277,13 @@ async def extract_and_save(
             clean = "\n".join(clean.split("\n")[:-1])
         extracted = json.loads(clean.strip())
         if not isinstance(extracted, list):
-            print(f"[Extractor] ✗ LLM 输出不是数组,跳过", flush=True)
+            logger.info("[Extractor] ✗ LLM 输出不是数组,跳过")
             return 0
         if not extracted:
-            print(f"[Extractor] ○ LLM 返回空数组,无新信息", flush=True)
+            logger.info("[Extractor] ○ LLM 返回空数组,无新信息")
             return 0
     except json.JSONDecodeError as e:
-        print(f"[Extractor] ✗ JSON 解析失败: {e}", flush=True)
+        logger.error("[Extractor] ✗ JSON 解析失败: %s", e)
         return 0
 
     # ── Post-check:拦截桌宠自述条目 ──────────────────────────
@@ -286,18 +291,18 @@ async def extract_and_save(
     for item in extracted:
         content = item.get("content", "").strip()
         if _is_about_self(content):
-            print(f"[Extractor]   🚫 post-check 丢弃(桌宠自述): {content!r}", flush=True)
+            logger.warning("[Extractor]   🚫 post-check 丢弃(桌宠自述): %r", content)
             continue
         post_checked.append(item)
 
     if not post_checked:
-        print(f"[Extractor] ✗ post-check 后为空(候选 {len(extracted)} 条全是自述)", flush=True)
+        logger.info("[Extractor] ✗ post-check 后为空(候选 %d 条全是自述)", len(extracted))
         return 0
 
     # ── 双层去重 ──────────────────────────────────────────────
     deduped = await _deduplicate(llm_client, model, post_checked, existing_entries)
     if not deduped:
-        print(f"[Extractor] ○ 去重后为 0(候选 {len(post_checked)} 条全部重复)", flush=True)
+        logger.info("[Extractor] ○ 去重后为 0(候选 %d 条全部重复)", len(post_checked))
         return 0
 
     # ── 构造并写入笔记本 ──────────────────────────────────────
@@ -314,9 +319,9 @@ async def extract_and_save(
 
     if entries:
         add_entries_batch(entries)
-        print(f"[Extractor] ✅ 写入 {len(entries)} 条新记忆 | session={session_id}", flush=True)
+        logger.info("[Extractor] ✅ 写入 %d 条新记忆 | session=%s", len(entries), session_id)
         for e in entries:
-            print(f"[Extractor]   ✓ {e.content!r} tags={e.tags}", flush=True)
+            logger.debug("[Extractor]   ✓ %r tags=%s", e.content, e.tags)
 
     return len(entries)
 
@@ -347,10 +352,12 @@ class SessionExtractor:
         self._extracted_up_to    = 0
         self._pending_task: Optional[asyncio.Task] = None
 
-        print(
-            f"[Extractor] 🆕 SessionExtractor 创建 | session={session_id} "
-            f"character={character_id!r} 阈值={EXTRACT_EVERY_N_ROUNDS}轮",
-            flush=True,
+        logger.info(
+            "[Extractor] 🆕 SessionExtractor 创建 | session=%s "
+            "character=%r 阈值=%d轮",
+            session_id,
+            character_id,
+            EXTRACT_EVERY_N_ROUNDS,
         )
 
     def on_round_complete(self, messages_so_far: list[TimelineMessage]) -> None:
@@ -358,14 +365,17 @@ class SessionExtractor:
         self._round_count += 1
         gap = self._round_count - self._extracted_up_to
 
-        print(
-            f"[Extractor] 📈 轮数+1 round={self._round_count} "
-            f"gap={gap}/{EXTRACT_EVERY_N_ROUNDS} session={self.session_id}",
-            flush=True,
+        logger.info(
+            "[Extractor] 📈 轮数+1 round=%d "
+            "gap=%d/%d session=%s",
+            self._round_count,
+            gap,
+            EXTRACT_EVERY_N_ROUNDS,
+            self.session_id,
         )
 
         if gap >= EXTRACT_EVERY_N_ROUNDS:
-            print(f"[Extractor] 🔔 达到阈值,触发后台提取", flush=True)
+            logger.info("[Extractor] 🔔 达到阈值,触发后台提取")
             self._trigger_background_extraction(messages_so_far)
 
     async def on_session_end(self, messages_so_far: list[TimelineMessage]) -> None:
@@ -378,18 +388,21 @@ class SessionExtractor:
             try:
                 await asyncio.wait_for(self._pending_task, timeout=15.0)
             except (asyncio.TimeoutError, asyncio.CancelledError):
-                print(f"[Extractor] ⚠ 等待上一个后台提取超时,继续收尾", flush=True)
+                logger.warning("[Extractor] ⚠ 等待上一个后台提取超时,继续收尾")
 
         unextracted_rounds = self._round_count - self._extracted_up_to
-        print(
-            f"[Extractor] 🏁 会话结束 round={self._round_count} "
-            f"extracted_up_to={self._extracted_up_to} unextracted={unextracted_rounds} "
-            f"session={self.session_id}",
-            flush=True,
+        logger.info(
+            "[Extractor] 🏁 会话结束 round=%d "
+            "extracted_up_to=%d unextracted=%d "
+            "session=%s",
+            self._round_count,
+            self._extracted_up_to,
+            unextracted_rounds,
+            self.session_id,
         )
 
         if unextracted_rounds < 1:
-            print(f"[Extractor] ○ 无未提取对话,跳过收尾", flush=True)
+            logger.info("[Extractor] ○ 无未提取对话,跳过收尾")
             return
 
         self._extracted_up_to = self._round_count
@@ -405,9 +418,9 @@ class SessionExtractor:
                 session_id=self.session_id,
                 recent_messages=recent,
             )
-            print(f"[Extractor] 🏁 收尾提取完成,新增 {count} 条", flush=True)
+            logger.info("[Extractor] 🏁 收尾提取完成,新增 %d 条", count)
         except Exception as e:
-            print(f"[Extractor] ✗ 收尾提取异常: {e}", flush=True)
+            logger.error("[Extractor] ✗ 收尾提取异常: %s", e)
 
     def _trigger_background_extraction(self, messages: list[TimelineMessage]) -> None:
         """后台触发提取(10 轮定时,不阻塞对话)"""
@@ -428,12 +441,12 @@ class SessionExtractor:
                     llm_client=llm_client, model=model, character=character,
                     character_id=character_id, session_id=session_id, recent_messages=recent,
                 )
-                print(f"[Extractor] 📦 后台提取完成,新增 {count} 条 (session={session_id})", flush=True)
+                logger.info("[Extractor] 📦 后台提取完成,新增 %d 条 (session=%s)", count, session_id)
             except Exception as e:
-                print(f"[Extractor] ✗ 后台提取异常 (session={session_id}): {e}", flush=True)
+                logger.error("[Extractor] ✗ 后台提取异常 (session=%s): %s", session_id, e)
 
         if self._pending_task and not self._pending_task.done():
-            print(f"[Extractor]   上一个后台提取还在运行,跳过本次", flush=True)
+            logger.debug("[Extractor]   上一个后台提取还在运行,跳过本次")
             return
 
         self._pending_task = asyncio.create_task(_run())

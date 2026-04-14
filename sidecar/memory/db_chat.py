@@ -1,13 +1,12 @@
-"""
-Reverie Link · 记忆系统 — 聊天记录数据库
-
-负责所有原始消息的持久化存储与查询。
-数据文件：data/chat_history.db
-
-参考文档：PHASE3_MEMORY_DESIGN.md § 3
-"""
-
 from __future__ import annotations
+
+import logging
+logger = logging.getLogger(__name__)
+
+# Reverie Link · 记忆系统 — 聊天记录数据库
+# 负责所有原始消息的持久化存储与查询。
+# 数据文件：data/chat_history.db
+# 参考文档：PHASE3_MEMORY_DESIGN.md § 3
 
 import json
 import sqlite3
@@ -69,7 +68,7 @@ def _migrate_add_character_id(conn: sqlite3.Connection) -> None:
     if "character_id" not in existing_cols:
         conn.execute("ALTER TABLE messages ADD COLUMN character_id TEXT NOT NULL DEFAULT ''")
         conn.commit()
-        print("[Memory] 聊天记录数据库迁移：已添加 character_id 列")
+        logger.info("[Memory] 聊天记录数据库迁移：已添加 character_id 列")
 
 
 def init_chat_db() -> None:
@@ -82,7 +81,7 @@ def init_chat_db() -> None:
         conn.commit()
         # 对已有旧数据库执行迁移
         _migrate_add_character_id(conn)
-        print("[Memory] 聊天记录数据库初始化完成")
+        logger.info("[Memory] 聊天记录数据库初始化完成")
     finally:
         conn.close()
 

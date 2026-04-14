@@ -83,7 +83,7 @@ def init_memory_system() -> None:
     """
     init_chat_db()
     init_notebook_db()
-    print("[Memory] 记忆系统初始化完成")
+    logger.info("[Memory] 记忆系统初始化完成")
 
 
 def shutdown_memory_system() -> None:
@@ -94,4 +94,4 @@ def shutdown_memory_system() -> None:
     close_chat_db()
     close_notebook_db()
     close_vector_db()
-    print("[Memory] 记忆系统已关闭")
+    logger.info("[Memory] 记忆系统已关闭")

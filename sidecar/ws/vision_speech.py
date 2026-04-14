@@ -96,10 +96,10 @@ async def _drain_vision_speech(
             except asyncio.QueueEmpty:
                 break
         if drained > 0:
-            print(
-                f"[VisionSpeech] 冷却中(剩余{cooldown_remaining:.1f}s)，"
-                f"丢弃队列中堆积的 {drained} 个触发",
-                flush=True,
+            logger.info(
+                "[VisionSpeech] 冷却中(剩余%.1fs)，"
+                "丢弃队列中堆积的 %s 个触发",
+                cooldown_remaining, drained,
             )
         return
 
@@ -124,21 +124,23 @@ async def _drain_vision_speech(
     trigger_scene = trigger.get("scene_info", {}).get("scene_type", "unknown")
     trigger_game  = trigger.get("scene_info", {}).get("game_name")
     trigger_desc  = trigger.get("scene_info", {}).get("scene_description", "")
-    print(
-        f"[VisionSpeech] ▶ 触发取出 | reason={trigger_reason} scene={trigger_scene} "
-        f"game={trigger_game} extras_dropped={extras_dropped} "
-        f"history_len={len(history)} window_idx={window_index}",
-        flush=True,
+    logger.info(
+        "[VisionSpeech] ▶ 触发取出 | reason=%s scene=%s "
+        "game=%s extras_dropped=%s "
+        "history_len=%s window_idx=%s",
+        trigger_reason, trigger_scene,
+        trigger_game, extras_dropped,
+        len(history), window_index,
     )
     if trigger_desc:
-        print(f"[VisionSpeech]   场景描述: {trigger_desc[:120]}", flush=True)
+        logger.debug("[VisionSpeech]   场景描述: %s", trigger_desc[:120])
 
     # 跨 session 触发直接丢弃
     if trigger.get("session_id") and trigger["session_id"] != session_id:
-        print(
-            f"[VisionSpeech] ✗ 跨 session 丢弃 | "
-            f"trigger_session={trigger.get('session_id')} current_session={session_id}",
-            flush=True,
+        logger.warning(
+            "[VisionSpeech] ✗ 跨 session 丢弃 | "
+            "trigger_session=%s current_session=%s",
+            trigger.get('session_id'), session_id,
         )
         return
 
@@ -167,16 +169,16 @@ async def _drain_vision_speech(
                     character_id=session_character_id,
                     top_k=3,
                 )
-                print(
-                    f"[VisionSpeech] 🔍 向量检索完成 | query={query[:60]!r} "
-                    f"hits={len(relevant_summaries)} 耗时={time.time()-t_vec:.2f}s",
-                    flush=True,
+                logger.info(
+                    "[VisionSpeech] 🔍 向量检索完成 | query=%r "
+                    "hits=%s 耗时=%.2fs",
+                    query[:60], len(relevant_summaries), time.time()-t_vec,
                 )
                 if relevant_summaries:
                     for i, s in enumerate(relevant_summaries):
-                        print(f"[VisionSpeech]   命中#{i}: {s[:80]}", flush=True)
+                        logger.debug("[VisionSpeech]   命中#%s: %s", i, s[:80])
             except Exception as e:
-                print(f"[VisionSpeech] ⚠ 向量检索失败: {e}", flush=True)
+                logger.warning("[VisionSpeech] ⚠ 向量检索失败: %s", e)
 
     if character and "address" not in trigger:
         trigger["address"] = character.get("address", "用户")
@@ -193,10 +195,9 @@ async def _drain_vision_speech(
             relevant_summaries=relevant_summaries,
         )
 
-        print(
-            f"[VisionSpeech] 📝 messages 组装完成 | count={len(messages)} | "
-            f"{_summarize_messages_for_log(messages)}",
-            flush=True,
+        logger.info(
+            "[VisionSpeech] 📝 messages 组装完成 | count=%s | %s",
+            len(messages), _summarize_messages_for_log(messages),
         )
 
         t_llm = time.time()
@@ -211,10 +212,10 @@ async def _drain_vision_speech(
                 frequency_penalty=frequency_penalty,
             )
         except Exception as fallback_e:
-            print(
-                f"[VisionSpeech] max_completion_tokens 不被支持，"
-                f"fallback 到 max_tokens | err={fallback_e}",
-                flush=True,
+            logger.info(
+                "[VisionSpeech] max_completion_tokens 不被支持，"
+                "fallback 到 max_tokens | err=%s",
+                fallback_e,
             )
             response = await llm_client.chat.completions.create(
                 model=llm_model,
@@ -229,14 +230,14 @@ async def _drain_vision_speech(
 
         # 关键：记录 LLM 原始完整输出（不是清洗后给前端的版本）
         # 这是事后排查"为什么模型这次输出了奇怪的东西"的唯一手段
-        print(
-            f"[VisionSpeech] 🤖 LLM 调用完成 | model={llm_model} 耗时={llm_elapsed:.2f}s "
-            f"原始长度={len(reply)}",
-            flush=True,
+        logger.info(
+            "[VisionSpeech] 🤖 LLM 调用完成 | model=%s 耗时=%.2fs "
+            "原始长度=%s",
+            llm_model, llm_elapsed, len(reply),
         )
-        print(f"[VisionSpeech]   LLM 原始输出: {reply!r}", flush=True)
+        logger.debug("[VisionSpeech]   LLM 原始输出: %r", reply)
     except Exception as e:
-        print(f"[VisionSpeech] ✗ 主动发言 LLM 调用失败: {e}", flush=True)
+        logger.error("[VisionSpeech] ✗ 主动发言 LLM 调用失败: %s", e)
         return
 
     emotion = _extract_emotion(reply)
@@ -252,17 +253,17 @@ async def _drain_vision_speech(
 
     # 模型主动选择沉默
     if not clean_reply or clean_reply in ("……", "...", "。"):
-        print(
-            f"[VisionSpeech] 🤐 模型选择沉默，跳过发送 | clean={clean_reply!r}",
-            flush=True,
+        logger.info(
+            "[VisionSpeech] 🤐 模型选择沉默，跳过发送 | clean=%r",
+            clean_reply,
         )
         return
 
     # ── 退化重复检测：直接静默丢弃 ─────────────────────────────
     if is_degenerate_repetition(clean_reply):
-        print(
-            f"[VisionSpeech] 🚫 退化重复输出，静默丢弃 | 内容={clean_reply[:60]!r}",
-            flush=True,
+        logger.info(
+            "[VisionSpeech] 🚫 退化重复输出，静默丢弃 | 内容=%r",
+            clean_reply[:60],
         )
         return
 
@@ -296,12 +297,12 @@ async def _drain_vision_speech(
         "_source": "vision_proactive",
     })
 
-    print(
-        f"[VisionSpeech] ✅ 主动发言已发送 | clean_len={len(clean_reply)} "
-        f"emotion={emotion} history_len_after={len(history)}",
-        flush=True,
+    logger.info(
+        "[VisionSpeech] ✅ 主动发言已发送 | clean_len=%s "
+        "emotion=%s history_len_after=%s",
+        len(clean_reply), emotion, len(history),
     )
-    print(f"[VisionSpeech]   清洗后内容: {clean_reply!r}", flush=True)
+    logger.debug("[VisionSpeech]   清洗后内容: %r", clean_reply)
 
     await websocket.send_text(json.dumps(
         {"type": "vision_proactive_speech", "message": reply},
