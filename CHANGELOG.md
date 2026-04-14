@@ -5,6 +5,41 @@
 
 ---
 
+## [Unreleased] - Phase 3 开发中（持续迭代）
+
+> Phase 3 核心架构（记忆系统与视觉感知）已实装，当前处于重构与 Bug 修复阶段。
+
+### 新增 / 优化（Phase 3 后续迭代，2026-03 ~ 04）
+
+**代码架构重构**
+- **后端模块化拆分**：`main.py` 拆分为独立 router 子模块（`routers/live2d.py`、`routers/memory_api.py`、`routers/tts.py`）及 `utils/` 工具目录，主入口仅保留启动与路由注册逻辑。
+- **Prompt 子包重构**：`prompt_builder.py` 重构为 `sidecar/prompt/` 子包（`constants.py`、`system_prompt.py`、`messages.py`），关注点分离，便于独立维护各层 Prompt 逻辑。
+- **前端组件拆分**：`SettingsApp.vue` 拆分为独立 Tab 组件（`CharacterTab.vue`、`LLMTab.vue`、`GlobalTab.vue`、`NotebookModal.vue`、`DeleteCharDialog.vue`）；`App.vue` 拆分为多个 composable（`useLive2D`、`useSizePreset`、`useTTS`、`useWebSocket`、`useWindowManager`），主文件大幅精简。
+
+**Bug 修复**
+- **复读修复**：引入 `sidecar/utils/dedup.py` 退化输出检测模块，通过三层防御（移除 event 污染源、视觉历史来源标签隔断自强化循环、兜底 fallback 机制）彻底解决主动发言复读问题。
+- **抢话修复**：优化并发冲突保护逻辑，用户交互时主动发言通道正确挂起。
+- **记忆断层修复**：修复会话结束时异步提取任务提前丢弃导致记忆丢失的问题（`await` 修正）。
+
+**Prompt 与历史记录优化**
+- 优化 system prompt 约束放置位置（硬约束移至 prompt 尾部以利用 recency bias）。
+- 引入正向风格引导与中性触发助手预填，减少模型输出中的套话与重复模式。
+- 视觉感知模块主动发言新增向量记忆语义检索注入（Layer 2 proactive speech）。
+- 历史消息管理优化，记忆提取器鲁棒性提升。
+
+**系统托盘动态菜单**
+- Rust 端重构托盘菜单为动态重建机制（`update_tray_menu`），支持从前端同步角色列表和 Live2D 模型列表，当前激活项高亮显示（勾选标记）。
+- 新增「隐藏/显示桌宠」托盘菜单项，可在不退出程序的情况下快速隐藏主窗口。
+- 新增托盘菜单静音切换功能。
+
+**设置界面新增文件夹快捷入口**
+- 全局设置 Tab 和角色设定 Tab 新增「打开文件夹」按钮，点击直接在资源管理器中打开 `public/live2d/` 或 `public/rvc/` 对应目录，简化用户放置模型文件的操作流程。
+
+**性能优化**
+- 优化 Vite 构建配置，显著改善开发环境启动时间。
+
+---
+
 ## [Unreleased] - Phase 3 开发中
 
 > Phase 3 核心架构（记忆系统与视觉感知）已实装。

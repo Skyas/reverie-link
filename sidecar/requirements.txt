@@ -1,17 +1,20 @@
+# ── 核心后端 ──────────────────────────────────────────────────
 fastapi
 uvicorn[standard]
 openai
 python-dotenv
 httpx
+
+# ── Phase 3: 记忆系统 ─────────────────────────────────────────
 chromadb
-# --- Phase 3: 视觉感知 ---
+
+# ── Phase 3: 视觉感知 ─────────────────────────────────────────
 Pillow
 psutil
-# --- 下面是 Bert-VITS2 运行必备的基础库 ---
-torch
-torchaudio
-transformers
-librosa
-jieba
-cn2an
-pypinyin
+
+# ── Phase 2: 本地语音合成 ─────────────────────────────────────
+# edge-tts：本地 TTS 底层引擎（替代原 pyttsx3 方案，调用微软 Edge 在线合成）
+edge-tts
+# 以下为本地 RVC v2 变声依赖（rvc_infer.py 实装后启用）
+# torch
+# rvc-python
