@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from "vue";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 
 // ── 厂商预设 ──────────────────────────────────────────────────
 const VENDORS = [
@@ -138,6 +138,20 @@ function saveTTS() {
     showMsg("✓ 语音配置已保存");
 }
 
+async function openRVCFolder() {
+    try {
+        const res = await fetch("http://localhost:18000/api/folder-paths");
+        const { rvc } = await res.json();
+        
+        // 直接调用，无需重新动态 import
+        await revealItemInDir(rvc);
+        console.log("[LLMTab] 打开 RVC 文件夹:", rvc);
+    } catch (e) {
+        console.error("[openFolder] 完整错误:", e);
+        showMsg("无法打开文件夹", "warn");
+    }
+}
+
 // ── 初始化 ─────────────────────────────────────────────────────
 onMounted(() => {
     const savedKeys = localStorage.getItem("rl-api-keys");
@@ -250,11 +264,13 @@ onMounted(() => {
         <div class="global-section-title" style="margin-bottom:8px;">🔊 语音合成</div>
 
         <div class="field-group">
-            <label class="toggle-row" style="cursor:pointer; margin-bottom:8px;">
+            <div class="toggle-row" style="margin-bottom:8px;">
                 <span class="field-label">启用语音合成</span>
-                <input type="checkbox" v-model="tts.enabled"
-                       style="width:16px;height:16px;accent-color:var(--c-blue);" />
-            </label>
+                <label class="toggle-switch">
+                    <input type="checkbox" v-model="tts.enabled" />
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
             <div class="engine-selector">
                 <div class="engine-card" :class="{ active: tts.engine === 'elevenlabs' }"
                      @click="tts.engine = 'elevenlabs'">
@@ -301,7 +317,10 @@ onMounted(() => {
                 <div v-if="rvcLoading" class="models-loading">扫描中…</div>
                 <div v-else-if="rvcVoices.length === 0" class="models-empty">
                     <p class="field-note">未找到音色文件</p>
-                    <button class="refresh-btn" @click="fetchRVCVoices">重新扫描</button>
+                    <div style="display:flex; gap:8px;">
+                        <button class="refresh-btn" @click="fetchRVCVoices">重新扫描</button>
+                        <button class="refresh-btn" @click="openRVCFolder">📂 打开文件夹</button>
+                    </div>
                 </div>
                 <div v-else class="rvc-voices-list">
                     <p class="field-hint" style="margin-bottom:4px;">
@@ -317,7 +336,10 @@ onMounted(() => {
                             <span v-else>✓ Index 文件匹配</span>
                         </div>
                     </div>
-                    <button class="refresh-btn" @click="fetchRVCVoices">🔄 重新扫描</button>
+                    <div style="display:flex; gap:8px;">
+                        <button class="refresh-btn" @click="fetchRVCVoices">🔄 重新扫描</button>
+                        <button class="refresh-btn" @click="openRVCFolder">📂 打开文件夹</button>
+                    </div>
                 </div>
             </div>
             <div class="field-group">
@@ -396,12 +418,19 @@ onMounted(() => {
 .toast {
     position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
     padding: 8px 20px; border-radius: 20px;
-    background: linear-gradient(135deg, var(--c-blue-mid), var(--c-pink));
-    color: white; font-size: 13px; font-weight: 500;
-    box-shadow: 0 4px 16px rgba(126,87,194,0.2);
+    background: linear-gradient(white, white) padding-box,
+                linear-gradient(135deg, #A8D8EA, #FFB7C5) border-box;
+    border: 2px solid transparent;
+    color: #4A4A6A;
+    font-size: 13px; font-weight: 600;
+    box-shadow: 0 4px 20px rgba(80, 60, 120, 0.22);
     z-index: 200; pointer-events: none; white-space: nowrap;
 }
-.toast.warn { background: linear-gradient(135deg, #F0A0A0, #E08080); }
+.toast.warn {
+    background: linear-gradient(white, white) padding-box,
+                linear-gradient(135deg, #F0A0A0, #E08080) border-box;
+    color: #C05050;
+}
 .toast-enter-active { transition: opacity 0.25s ease, transform 0.25s ease; }
 .toast-leave-active { transition: opacity 0.2s ease; }
 .toast-enter-from { opacity: 0; transform: translateX(-50%) translateY(-10px); }

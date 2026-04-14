@@ -6,6 +6,7 @@ Reverie Link · Live2D 路由
   - _optimize_idle_fade：检测帧切换型 idle，禁用 crossfade 防闪烁
 """
 
+import os
 import json
 from pathlib import Path
 
@@ -18,6 +19,25 @@ LIVE2D_DIR = Path(__file__).parent.parent.parent / "public" / "live2d"
 router = APIRouter()
 
 
+@router.get("/api/folder-paths")
+async def get_folder_paths():
+    base = Path(__file__).parent.parent.parent  # sidecar/../.. = 项目根
+    live2d_dir = (base / "public" / "live2d").resolve()
+    rvc_dir    = (base / "public" / "rvc").resolve()
+    
+    # 【核心修复】确保物理目录存在，避免操作系统找不到路径而报错
+    live2d_dir.mkdir(parents=True, exist_ok=True)
+    rvc_dir.mkdir(parents=True, exist_ok=True)
+    
+    live2d_path_str = os.path.normpath(str(live2d_dir))
+    rvc_path_str = os.path.normpath(str(rvc_dir))
+
+    print(f"[FolderPaths] live2d={live2d_path_str} rvc={rvc_path_str}")
+    return {
+        "live2d": live2d_path_str,
+        "rvc":    rvc_path_str,
+    }
+    
 @router.get("/api/live2d/models")
 async def list_live2d_models():
     """

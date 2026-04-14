@@ -1,5 +1,6 @@
 <script setup lang="ts">
     import { ref, onMounted } from "vue";
+    import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 
     // ── Props / Emits ──────────────────────────────────────────────
     const emit = defineEmits<{
@@ -76,6 +77,20 @@
             await tauriEmit("model-changed", { path: selectedModelPath.value });
         } catch (e) { console.warn("[model settings] emit failed:", e); }
         showMsg("✓ 显示设置已应用");
+    }
+
+    async function openLive2DFolder() {
+        try {
+            const res = await fetch("http://localhost:18000/api/folder-paths");
+            const { live2d } = await res.json();
+            
+            await revealItemInDir(live2d);
+            console.log("[LLMTab] 打开 RVC 文件夹:", live2d);
+        } catch (e) {
+            console.warn("[GlobalTab] 打开文件夹失败:", e);
+            console.error("[openFolder] 完整错误:", e);
+            showMsg("无法打开文件夹", "warn");
+        }
     }
 
     // ── 窗口尺寸 ───────────────────────────────────────────────────
@@ -184,7 +199,10 @@
                     </div>
                     <div v-if="selectedModelPath === m.path" class="model-active-badge">使用中</div>
                 </div>
-                <button class="refresh-btn" @click="fetchLive2DModels">🔄 重新扫描</button>
+                <div style="display:flex; gap:8px;">
+                    <button class="refresh-btn" @click="fetchLive2DModels">🔄 重新扫描</button>
+                    <button class="refresh-btn" @click="openLive2DFolder">📂 打开文件夹</button>
+                </div>
             </div>
 
             <!-- 模型显示调整 -->
@@ -251,10 +269,13 @@
         <div class="global-section">
             <div class="global-section-title">🎮 视觉感知</div>
 
-            <label class="toggle-row" style="margin-bottom:10px;">
+            <div class="toggle-row" style="margin-bottom:10px;">
                 <span class="field-label">启用视觉感知</span>
-                <input type="checkbox" v-model="visionEnabled" @change="saveVision" />
-            </label>
+                <label class="toggle-switch">
+                    <input type="checkbox" v-model="visionEnabled" @change="saveVision" />
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
             <p class="field-hint" style="color:var(--c-text-soft);margin-bottom:12px;">
                 🔒 隐私说明：截图仅在内存中存在，用于实时分析后立即释放，永不保存到磁盘。
             </p>
@@ -302,12 +323,15 @@
                 </div>
 
                 <!-- 手动观战模式 -->
-                <label class="toggle-row" style="margin-bottom:12px;">
+                <div class="toggle-row" style="margin-bottom:12px;">
                     <span class="field-label">
                         手动观战模式 <span class="field-note">强制标记当前为游戏场景</span>
                     </span>
-                    <input type="checkbox" v-model="visionManualGameMode" @change="saveVision" />
-                </label>
+                    <label class="toggle-switch">
+                        <input type="checkbox" v-model="visionManualGameMode" @change="saveVision" />
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
 
                 <div class="action-row">
                     <button class="save-btn" @click="saveVision">保存视觉感知配置</button>
@@ -348,25 +372,21 @@
 
 <style scoped>
     .toast {
-        position: fixed;
-        top: 16px;
-        left: 50%;
-        transform: translateX(-50%);
-        padding: 8px 20px;
-        border-radius: 20px;
-        background: linear-gradient(135deg, var(--c-blue-mid), var(--c-pink));
-        color: white;
-        font-size: 13px;
-        font-weight: 500;
-        box-shadow: 0 4px 16px rgba(126,87,194,0.2);
-        z-index: 200;
-        pointer-events: none;
-        white-space: nowrap;
+    position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
+    padding: 8px 20px; border-radius: 20px;
+    background: linear-gradient(white, white) padding-box,
+                linear-gradient(135deg, #A8D8EA, #FFB7C5) border-box;
+    border: 2px solid transparent;
+    color: #4A4A6A;
+    font-size: 13px; font-weight: 600;
+    box-shadow: 0 4px 20px rgba(80, 60, 120, 0.22);
+    z-index: 200; pointer-events: none; white-space: nowrap;
     }
-
-        .toast.warn {
-            background: linear-gradient(135deg, #F0A0A0, #E08080);
-        }
+    .toast.warn {
+        background: linear-gradient(white, white) padding-box,
+                    linear-gradient(135deg, #F0A0A0, #E08080) border-box;
+        color: #C05050;
+    }
 
     .toast-enter-active {
         transition: opacity 0.25s ease, transform 0.25s ease;

@@ -431,6 +431,51 @@
     .dialog-enter-from, .dialog-leave-to {
         opacity: 0;
     }
+
+    /* ── Toggle 开关（供所有子组件使用）────────────────────────── */
+    .toggle-switch {
+        position: relative;
+        width: 40px;
+        height: 22px;
+        flex-shrink: 0;
+    }
+
+    .toggle-switch input {
+        position: absolute;
+        opacity: 0;
+        width: 0;
+        height: 0;
+    }
+
+    .toggle-slider {
+        position: absolute;
+        inset: 0;
+        background: rgba(200, 190, 220, 0.4);
+        border-radius: 11px;
+        cursor: pointer;
+        transition: background 0.25s;
+    }
+
+    .toggle-slider::before {
+        content: "";
+        position: absolute;
+        width: 16px;
+        height: 16px;
+        left: 3px;
+        top: 3px;
+        border-radius: 50%;
+        background: white;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
+        transition: transform 0.25s;
+    }
+
+    .toggle-switch input:checked + .toggle-slider {
+        background: linear-gradient(135deg, #A8D8EA, #FFB7C5);
+    }
+
+    .toggle-switch input:checked + .toggle-slider::before {
+        transform: translateX(18px);
+    }
 </style>
 
 <style scoped>
