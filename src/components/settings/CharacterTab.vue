@@ -374,12 +374,19 @@ onMounted(() => {
 .toast {
     position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
     padding: 8px 20px; border-radius: 20px;
-    background: linear-gradient(135deg, var(--c-blue-mid), var(--c-pink));
-    color: white; font-size: 13px; font-weight: 500;
-    box-shadow: 0 4px 16px rgba(126,87,194,0.2);
+    background: linear-gradient(white, white) padding-box,
+                linear-gradient(135deg, #A8D8EA, #FFB7C5) border-box;
+    border: 2px solid transparent;
+    color: #4A4A6A;
+    font-size: 13px; font-weight: 600;
+    box-shadow: 0 4px 20px rgba(80, 60, 120, 0.22);
     z-index: 200; pointer-events: none; white-space: nowrap;
 }
-.toast.warn { background: linear-gradient(135deg, #F0A0A0, #E08080); }
+.toast.warn {
+    background: linear-gradient(white, white) padding-box,
+                linear-gradient(135deg, #F0A0A0, #E08080) border-box;
+    color: #C05050;
+}
 .toast-enter-active { transition: opacity 0.25s ease, transform 0.25s ease; }
 .toast-leave-active { transition: opacity 0.2s ease; }
 .toast-enter-from { opacity: 0; transform: translateX(-50%) translateY(-10px); }
