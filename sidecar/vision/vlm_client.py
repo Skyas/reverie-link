@@ -14,6 +14,9 @@ import base64
 import json
 from dataclasses import dataclass, field
 from typing import Optional
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 # ── 结构化输出数据类 ─────────────────────────────────────────────
@@ -321,7 +324,7 @@ def _parse_vlm_response(raw: str, incremental: bool = False, base: Optional[VLMR
     # 改进：用括号配对提取 JSON（支持嵌套）
     data = _extract_json(raw)
     if data is None:
-        print(f"[VLM] 无法从回复中提取 JSON: {raw[:200]}")
+        logger.warning("[VLM] 无法从回复中提取 JSON: %s", raw[:200])
         return base or VLMResult()
 
     # 改进：scene_description 容错处理
@@ -458,7 +461,7 @@ class VLMClient:
             raw = response.choices[0].message.content.strip()
             return _parse_vlm_response(raw, incremental=incremental, base=base_result)
         except Exception as e:
-            print(f"[VLM] 调用失败 (model={model}): {e}")
+            logger.warning("[VLM] 调用失败 (model=%s): %s", model, e)
             return None
 
     def _select_client(self):
@@ -470,22 +473,22 @@ class VLMClient:
         """
         from openai import AsyncOpenAI
 
-        print(f"[VLM选择] vlm_model={self._vlm_model}, vlm_base_url={self._vlm_base_url[:30]}...")
-        print(f"[VLM选择] vlm_api_key={'有' if self._vlm_api_key else '无'}")
-        print(f"[VLM选择] main_model={self._main_model}, main_client={'有' if self._main_client else '无'}")
-        print(f"[VLM选择] main_is_multimodal={self._main_is_multimodal()}")
+        logger.info("[VLM选择] vlm_model=%s, vlm_base_url=%s...", self._vlm_model, self._vlm_base_url[:30])
+        logger.info("[VLM选择] vlm_api_key=%s", '有' if self._vlm_api_key else '无')
+        logger.info("[VLM选择] main_model=%s, main_client=%s", self._main_model, '有' if self._main_client else '无')
+        logger.info("[VLM选择] main_is_multimodal=%s", self._main_is_multimodal())
 
         # 优先级①：主模型支持多模态 → 无条件使用主模型
         if self._main_client and self._main_is_multimodal():
-            print(f"[VLM选择] → 使用主模型 {self._main_model}（多模态）")
+            logger.info("[VLM选择] → 使用主模型 %s（多模态）", self._main_model)
             return self._main_client, self._main_model
 
         # 优先级②：用户配置了独立 VLM（有 API Key）
         if self._vlm_api_key:
-            print(f"[VLM选择] → 使用独立VLM {self._vlm_model}")
+            logger.info("[VLM选择] → 使用独立VLM %s", self._vlm_model)
             client = AsyncOpenAI(api_key=self._vlm_api_key, base_url=self._vlm_base_url)
             return client, self._vlm_model
 
         # 无可用视觉模型
-        print("[VLM选择] → 无可用视觉模型")
+        logger.warning("[VLM选择] → 无可用视觉模型")
         return None, None

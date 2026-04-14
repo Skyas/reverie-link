@@ -13,6 +13,8 @@
 import json
 from pathlib import Path
 from typing import Optional
+import logging
+logger = logging.getLogger(__name__)
 
 
 # ── 已知游戏列表路径 ────────────────────────────────────────────
@@ -57,7 +59,7 @@ class GameDetector:
                 data = json.loads(_KNOWN_GAMES_PATH.read_text(encoding="utf-8"))
                 self._known_games = data.get("games", [])
         except Exception as e:
-            print(f"[GameDetector] 加载 known_games.json 失败: {e}")
+            logger.warning("[GameDetector] 加载 known_games.json 失败: %s", e)
             self._known_games = []
 
     def _save_known_games(self):
@@ -69,7 +71,7 @@ class GameDetector:
                 encoding="utf-8"
             )
         except Exception as e:
-            print(f"[GameDetector] 保存 known_games.json 失败: {e}")
+            logger.warning("[GameDetector] 保存 known_games.json 失败: %s", e)
 
     def add_known_game(self, process_name: str, game_name: str):
         """将 VLM 识别到的新游戏追加到已知列表"""
@@ -81,7 +83,7 @@ class GameDetector:
                 return  # 已存在，不重复添加
         self._known_games.append({"process": process_name, "name": game_name})
         self._save_known_games()
-        print(f"[GameDetector] 新游戏已记录: {process_name} → {game_name}")
+        logger.info("[GameDetector] 新游戏已记录: %s → %s", process_name, game_name)
 
     # ── 检测逻辑 ────────────────────────────────────────────────
 

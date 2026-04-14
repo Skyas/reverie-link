@@ -39,7 +39,10 @@ function loadCharacterName() {
     try {
         const presets = JSON.parse(localStorage.getItem("rl-presets") ?? "[]");
         const found   = presets.find((p: { id: string; name: string }) => p.id === characterId.value);
-        if (found) characterName.value = found.name;
+        if (found) {
+            characterName.value = found.name;
+            console.debug("[HistoryApp] loadCharacterName: found='%s' id='%s'", found.name, characterId.value);
+        }
     } catch { /* ignore */ }
 }
 
@@ -48,18 +51,22 @@ const sessions       = ref<Session[]>([]);
 const selectedSession = ref<string | null>(null);
 
 async function fetchSessions() {
+    console.debug("[HistoryApp] fetchSessions: 开始获取会话列表 characterId=%s", characterId.value);
     try {
         const params = new URLSearchParams();
         if (characterId.value) params.set("character_id", characterId.value);
         const res  = await fetch(`http://localhost:18000/api/chat/sessions?${params}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         sessions.value = data.sessions ?? [];
+        console.info("[HistoryApp] fetchSessions: 获取到 %s 个会话", sessions.value.length);
         // 默认选中最近一次会话
         if (sessions.value.length > 0 && selectedSession.value === null) {
             selectedSession.value = sessions.value[0].session_id;
             await fetchMessages(1);
         }
-    } catch {
+    } catch (e) {
+        console.error("[HistoryApp] fetchSessions: 失败", e);
         showToast("获取会话列表失败，请确认后端已启动", true);
     }
 }
@@ -91,6 +98,7 @@ async function fetchMessages(p: number) {
         if (characterId.value) params.set("character_id", characterId.value);
         if (keyword.value.trim()) params.set("keyword", keyword.value.trim());
         const res  = await fetch(`http://localhost:18000/api/chat/messages?${params}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         // API 返回倒序，翻转为正序显示（最早的在上面）
         messages.value = (data.items ?? []).reverse();
@@ -98,7 +106,9 @@ async function fetchMessages(p: number) {
         page.value       = data.page       ?? 1;
         totalPages.value = data.total_pages ?? 1;
         jumpPage.value   = page.value;
-    } catch {
+        console.debug("[HistoryApp] fetchMessages: page=%s total=%s", p, total.value);
+    } catch (e) {
+        console.error("[HistoryApp] fetchMessages: 失败", e);
         showToast("获取消息失败", true);
     } finally {
         loading.value = false;
@@ -106,6 +116,7 @@ async function fetchMessages(p: number) {
 }
 
 async function selectSession(sessionId: string) {
+    console.debug("[HistoryApp] selectSession: id=%s", sessionId);
     selectedSession.value = sessionId;
     keyword.value = "";
     await fetchMessages(1);
@@ -120,6 +131,7 @@ async function doSearch() {
         await fetchMessages(1);
         return;
     }
+    console.info("[HistoryApp] doSearch: keyword='%s'", keyword.value.trim());
     searching.value = true;
     loading.value   = true;
     try {
@@ -129,13 +141,16 @@ async function doSearch() {
         });
         if (characterId.value) params.set("character_id", characterId.value);
         const res  = await fetch(`http://localhost:18000/api/chat/search?${params}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         messages.value   = (data.items ?? []).reverse();
         total.value      = messages.value.length;
         page.value       = 1;
         totalPages.value = 1;
         selectedSession.value = null;
-    } catch {
+        console.info("[HistoryApp] doSearch: 找到 %s 条结果", messages.value.length);
+    } catch (e) {
+        console.error("[HistoryApp] doSearch: 失败", e);
         showToast("搜索失败", true);
     } finally {
         loading.value   = false;
@@ -212,8 +227,10 @@ const messagesWithDateSep = computed(() => {
 
 // ── 初始化 ─────────────────────────────────────────────────────
 onMounted(async () => {
+    console.info("[HistoryApp] onMounted: 开始初始化");
     loadCharacterName();
     await fetchSessions();
+    console.info("[HistoryApp] onMounted: 完成");
 });
 </script>
 

@@ -19,6 +19,9 @@ from vision.scene_manager import SceneManager
 from vision.speech_engine import SpeechEngine, SpeechTrigger
 from vision.activity_monitor import ActivityMonitor, ActivityState
 from vision.capture_strategy import CaptureStrategy
+import logging
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_CAPTURE_INTERVAL = 10
 
@@ -78,10 +81,10 @@ class VisionSystem:
             self.event_buffer.reset_score()
             self.capture_strategy.reset()
             self.activity_monitor.start()
-            print("[Vision] 视觉感知已启用（含活动监控）")
+            logger.info("[Vision] 视觉感知已启用（含活动监控）")
         elif was_enabled and not self._enabled:
             self.activity_monitor.stop()
-            print("[Vision] 视觉感知已关闭")
+            logger.info("[Vision] 视觉感知已关闭")
 
     def set_session_info(self, session_id: str, character_id: str, address: str = "你"):
         self._session_id   = session_id
@@ -121,7 +124,7 @@ class VisionSystem:
             except Exception:
                 break
                 
-        print(f"[Vision] 🛑 用户主动互动，待发队列已清空。兴趣分冷却：{old_score} -> {new_score} (档位:{talk_level}, -{reduce_score})")
+        logger.info("[Vision] 🛑 用户主动互动，待发队列已清空。兴趣分冷却：%s -> %s (档位:%s, -%s)", old_score, new_score, talk_level, reduce_score)
 
     def on_user_message_done(self):
         self.speech_engine.set_user_interacting(False)
@@ -132,14 +135,14 @@ class VisionSystem:
         if self._task and not self._task.done():
             return
         self._task = asyncio.create_task(self._run_loop(), name="vision_loop")
-        print("[Vision] 后台任务已启动")
+        logger.info("[Vision] 后台任务已启动")
 
     def stop(self):
         if self._task and not self._task.done():
             self._task.cancel()
             self._task = None
         self.activity_monitor.stop()
-        print("[Vision] 后台任务已停止")
+        logger.info("[Vision] 后台任务已停止")
 
     # ── 主循环 ───────────────────────────────────────────────────
 
@@ -158,7 +161,7 @@ class VisionSystem:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                print(f"[Vision] 主循环异常: {e}")
+                logger.error("[Vision] 主循环异常: %s", e)
                 await asyncio.sleep(DEFAULT_CAPTURE_INTERVAL)
 
     # ── 闲置行为 ─────────────────────────────────────────────────
@@ -200,7 +203,7 @@ class VisionSystem:
                 }
                 await self._speech_queue.put(idle_trigger)
                 self.scene_manager.on_speech_triggered()
-                print(f"[Vision] 💤 闲置触发（{summary.idle_seconds:.0f}秒无操作）")
+                logger.info("[Vision] 💤 闲置触发（%s秒无操作）", int(summary.idle_seconds))
 
     # ── 帧处理 ───────────────────────────────────────────────────
 
@@ -213,7 +216,7 @@ class VisionSystem:
 
         # ─ 2. 空白检测 ──────────────────────────────────────────
         if await asyncio.to_thread(is_blank_screen, screenshot):
-            print("[Vision] 截屏为空白，跳过本帧")
+            logger.debug("[Vision] 截屏为空白，跳过本帧")
             return
 
         # ─ 3. 像素差异 ─────────────────────────────────────────
@@ -236,9 +239,9 @@ class VisionSystem:
                 self.event_buffer.add_score(1)
             # budget_exceeded 不加分
             threshold = self.speech_engine._get_threshold()
-            print(
-                f"[Vision] ⏭ 跳过VLM（原因={reason}，像素差={pixel_diff:.1f}%）"
-                f" 累计={self.event_buffer.accumulated_score}/{threshold}"
+            logger.debug(
+                "[Vision] ⏭ 跳过VLM（原因=%s，像素差=%.1f%%） 累计=%s/%s",
+                reason, pixel_diff, self.event_buffer.accumulated_score, threshold
             )
             await self._check_speech()
             return
@@ -268,7 +271,7 @@ class VisionSystem:
         )
 
         if vlm_result is None:
-            print(f"[Vision] ❌ VLM 失败（像素差={pixel_diff:.1f}%），跳过")
+            logger.warning("[Vision] ❌ VLM 失败（像素差=%.1f%%），跳过", pixel_diff)
             return
 
         # ─ 8.5 通知 CaptureStrategy ─────────────────────────────
@@ -276,7 +279,7 @@ class VisionSystem:
 
         # ─ 8.6 场景质变检测 ─────────────────────────────────────
         if vlm_result.scene_changed:
-            print("[Vision] 🔄 检测到场景内切换，下一帧将完整重识别")
+            logger.debug("[Vision] 🔄 检测到场景内切换，下一帧将完整重识别")
             self.scene_manager.on_manual_reset()
 
         # ─ 9. 游戏检测（保守策略：VLM 优先）────────────────
@@ -295,10 +298,10 @@ class VisionSystem:
                 vlm_result.scene_type = "game"
                 if detect["game_name"] and not vlm_result.game_name:
                     vlm_result.game_name = detect["game_name"]
-                print(f"[Vision] 🎮 game_detector 覆盖VLM（来源={detect['source']}，VLM置信=low）")
+                logger.debug("[Vision] 🎮 game_detector 覆盖VLM（来源=%s，VLM置信=low）", detect['source'])
             else:
                 # VLM 明确说不是游戏（medium/high）→ 信任 VLM
-                print(f"[Vision] ℹ️ game_detector={detect['source']}认为是游戏，但VLM置信={vlm_result.confidence}判定为{vlm_result.scene_type}，以VLM为准")
+                logger.debug("[Vision] ℹ️ game_detector=%s认为是游戏，但VLM置信=%s判定为%s，以VLM为准", detect['source'], vlm_result.confidence, vlm_result.scene_type)
 
         # 场景不是 game 时，清除残留的游戏字段
         if vlm_result.scene_type != "game":
@@ -322,15 +325,23 @@ class VisionSystem:
         game_str = f"《{vlm_result.game_name}》" if vlm_result.game_name else ""
         activity = self.activity_monitor.get_summary()
         stats = self.capture_strategy.get_stats()
-        print(
-            f"[Vision] 🔍 VLM分析（像素差={pixel_diff:.1f}%，{prompt_type}）"
-            f" 场景={vlm_result.scene_type}{game_str}"
-            f" 置信={vlm_result.confidence}"
-            f" 兴趣={vlm_result.interest_score}"
-            f" 累计={self.event_buffer.accumulated_score}/{threshold}"
-            f" 活动={activity.state.value}"
-            f" VLM次数={stats['total_vlm_calls']}"
-            f"\n         描述: {vlm_result.scene_description}"
+        logger.info(
+            "[Vision] 🔍 VLM分析（像素差=%.1f%%，%s）"
+            " 场景=%s%s"
+            " 置信=%s"
+            " 兴趣=%s"
+            " 累计=%s/%s"
+            " 活动=%s"
+            " VLM次数=%s"
+            "\n         描述: %s",
+            pixel_diff, prompt_type,
+            vlm_result.scene_type, game_str,
+            vlm_result.confidence,
+            vlm_result.interest_score,
+            self.event_buffer.accumulated_score, threshold,
+            activity.state.value,
+            stats['total_vlm_calls'],
+            vlm_result.scene_description,
         )
 
         # ─ 12. 发言决策 ────────────────────────────────────────
@@ -354,10 +365,11 @@ class VisionSystem:
         )
 
         if trigger is not None:
-            print(
-                f"[Vision] 💬 触发发言！原因={trigger.reason}"
-                f" 场景={scene_info.get('scene_type')}"
-                f" 活动={activity.state.value}"
+            logger.info(
+                "[Vision] 💬 触发发言！原因=%s"
+                " 场景=%s"
+                " 活动=%s",
+                trigger.reason, scene_info.get('scene_type'), activity.state.value
             )
             consumed_events = self.event_buffer.consume_all()
             self.event_buffer.reset_score()

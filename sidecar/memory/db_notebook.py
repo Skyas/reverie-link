@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Optional
 
 from .models import NotebookEntry, NotebookSource
+import logging
+logger = logging.getLogger(__name__)
 
 
 # ── 数据库文件路径 ─────────────────────────────────────────────────
@@ -66,7 +68,7 @@ def _migrate_add_character_id(conn: sqlite3.Connection) -> None:
     if "character_id" not in existing_cols:
         conn.execute("ALTER TABLE notebook_entries ADD COLUMN character_id TEXT NOT NULL DEFAULT ''")
         conn.commit()
-        print("[Memory] 笔记本数据库迁移：已添加 character_id 列")
+        logger.info("[Memory] 笔记本数据库迁移：已添加 character_id 列")
 
 
 def init_notebook_db() -> None:
@@ -78,7 +80,7 @@ def init_notebook_db() -> None:
             conn.execute(idx_sql)
         conn.commit()
         _migrate_add_character_id(conn)
-        print("[Memory] 笔记本数据库初始化完成")
+        logger.info("[Memory] 笔记本数据库初始化完成")
     finally:
         conn.close()
 

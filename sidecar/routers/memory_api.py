@@ -9,6 +9,9 @@ Reverie Link · 记忆相关 HTTP API
 
 import json
 from datetime import datetime
+import logging
+logger = logging.getLogger(__name__)
+
 
 from fastapi import APIRouter, Query
 from fastapi.responses import Response
@@ -198,8 +201,8 @@ async def api_character_delete_data(character_id: str):
     deleted_entries   = delete_entries_by_character(character_id)
     deleted_summaries = delete_summaries_by_character(character_id)
 
-    print(f"[Memory] 角色 {character_id} 数据已删除：{deleted_msgs} 条消息，"
-          f"{deleted_entries} 条笔记本条目，{deleted_summaries} 条摘要")
+    logger.info("[Memory] 角色 %s 数据已删除：%s 条消息，%s 条笔记本条目，%s 条摘要",
+                character_id, deleted_msgs, deleted_entries, deleted_summaries)
 
     return {
         "ok":                        True,
