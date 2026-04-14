@@ -9,6 +9,10 @@ Reverie Link · 记忆系统
 本文件导出所有公共 API，供 main.py 和 prompt_builder.py 使用。
 """
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 # ── 数据模型 ──────────────────────────────────────────────────────
 from .models import (
     MessageType,
