@@ -70,11 +70,14 @@ def build_system_prompt(character: dict) -> str:
                 f"{name}：{ex.get('char', '')}"
             )
 
-    # ── 情感表达规则（精简版）─────────────────────────────────────
+    # ── 情感表达规则（21 个标准情感标签）───────────────────────────
+    # 与 TTS 引擎的情感参数一一对应，不允许模型自由发明
     parts.append(
-        "\n【情感表达】在回复句末加一个情绪标签：\n"
-        "[happy] / [sad] / [angry] / [shy] / [surprised] / [sigh] / [neutral]\n"
-        "严格只用以上7个，不要自创。"
+        "\n【情感表达】每句回复末尾加一个情绪标签，从以下21个中选一个，严格只用这些，不要自创：\n"
+        "基础情绪：[neutral] [happy] [sad] [angry] [fearful] [surprised] [disgusted] [excited] [gentle]\n"
+        "角色风格：[playful] [shy] [proud] [worried] [confused] [cold] [serious]\n"
+        "说话方式：[whisper] [shout] [cry] [laugh] [sigh]\n"
+        "规则：每句只用一个标签，放在句末，不要在句中插入多个标签。"
     )
 
     # ── 截屏意图识别（Phase 3 视觉感知）──────────────────────────
