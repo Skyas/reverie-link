@@ -124,7 +124,13 @@ export function useWebSocket(callbacks: WebSocketCallbacks) {
 
     // ── 消息处理 ──────────────────────────────────────────────────────
     function handleMessage(event: MessageEvent) {
-        const data = JSON.parse(event.data);
+        let data: any;
+        try {
+            data = JSON.parse(event.data);
+        } catch (e) {
+            console.error("[WS] JSON 解析失败: %s | 原始数据: %r", e, event.data);
+            return;
+        }
 
         if (data.type === "chat_response") {
             isThinking.value = false;
@@ -153,24 +159,31 @@ export function useWebSocket(callbacks: WebSocketCallbacks) {
 
     // ── 连接管理 ──────────────────────────────────────────────────────
     function connectWS() {
+        console.info("[WS] 正在连接... | url=%s", WS_URL);
         ws = new WebSocket(WS_URL);
 
         ws.onopen = () => {
             isConnected.value = true;
+            console.info("[WS] 已连接 | url=%s", WS_URL);
             autoSendStoredConfig();
         };
 
         ws.onclose = () => {
             isConnected.value = false;
+            console.warn("[WS] 连接已关闭，%sms 后重连", RECONNECT_DELAY_MS);
             setTimeout(connectWS, RECONNECT_DELAY_MS);
         };
 
-        ws.onerror = () => { ws?.close(); };
+        ws.onerror = () => {
+            console.error("[WS] 连接错误");
+            ws?.close();
+        };
 
         ws.onmessage = handleMessage;
     }
 
     function disconnectWS() {
+        console.info("[WS] 主动断开连接");
         ws?.close();
     }
 
