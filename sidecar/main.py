@@ -55,6 +55,7 @@ from ws.vision_speech import _drain_vision_speech
 from routers.live2d import router as live2d_router
 from routers.tts import router as tts_router
 from routers.memory_api import router as memory_router
+from tts import tts_manager
 
 logger = logging.getLogger(__name__)
 
@@ -306,6 +307,17 @@ async def websocket_chat(websocket: WebSocket):
                         session_id=session_id,
                         character_id=session_character_id,
                         address=current_character.get("address", "你"),
+                    )
+
+                # ── TTS 配置更新 ──────────────────────────────────────
+                if "tts" in data:
+                    tts_cfg = data["tts"]
+                    tts_manager.configure(tts_cfg)
+                    print(
+                        f"[Configure] TTS 已更新 | mode={tts_cfg.get('mode')} "
+                        f"provider={tts_cfg.get('provider')} "
+                        f"voice_id={tts_cfg.get('voice_id')}",
+                        flush=True,
                     )
 
                 extractor.update_config(llm_client=llm_client, model=LLM_MODEL, character=current_character, character_id=session_character_id)
