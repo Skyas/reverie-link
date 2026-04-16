@@ -4,6 +4,7 @@ Reverie Link · TTSManager — TTS 路由层
 变更记录：
   [FIX-⑤] configure() 接收 proxy 字段，传递给各在线引擎
   [FEAT-①] configure() 接收 model 字段，透传给各引擎构造函数
+  [FIX-⑥] test_connection 把 self._voice_id 传给引擎（修复 cfg 未定义错误）
 """
 
 import logging
@@ -163,9 +164,28 @@ class TTSManager:
     async def test_connection(self) -> dict:
         if self._engine is None:
             return {"success": False, "message": "未配置任何 TTS 引擎"}
+
+        # [FIX-⑥] 把当前配置的 voice_id 传给引擎，避免引擎内部硬编码音色
+        # 与新版 model 不匹配（如 cosyvoice-v3.5-flash 没有系统音色）
         try:
-            ok = await self._engine.test_connection()
-            return {"success": ok, "message": "连接成功" if ok else "连接失败"}
+            ok = await self._engine.test_connection(voice_id=self._voice_id)
+            if ok:
+                return {"success": True, "message": "连接成功"}
+            # 引擎内部已经打了详细日志，这里给前端一个更明确的提示
+            if not self._voice_id:
+                return {"success": False, "message": "连接失败：请先配置音色 ID"}
+            return {"success": False, "message": "连接失败：请检查 API Key、模型与音色 ID 是否匹配"}
+        except TypeError:
+            # 兼容尚未升级签名的引擎（例如还没改的 minimax / elevenlabs）
+            logger.warning(
+                f"[TTSManager] 引擎 {self._provider} 的 test_connection 不接受 voice_id 参数，"
+                f"回退为无参调用"
+            )
+            try:
+                ok = await self._engine.test_connection()
+                return {"success": ok, "message": "连接成功" if ok else "连接失败"}
+            except Exception as e:
+                return {"success": False, "message": str(e)}
         except Exception as e:
             return {"success": False, "message": str(e)}
 
