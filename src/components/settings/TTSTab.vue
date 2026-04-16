@@ -10,6 +10,11 @@
  *   [FIX-②]  openUrl fallback：plugin-opener 失败时退回 window.open()
  *   [FEAT-①] 模型选择：下拉预设 + 自定义输入，按供应商独立存储
  *            阿里云：音色按模型分组（不同模型支持的音色不同）
+ *   [FIX-⑦]  voice 状态细粒度存储（aliyun 按 provider+model 分桶）
+ *            解决以下三个 bug：
+ *              1) v3→v3.5 直接切换时，手动输入框内容被忽略（flag 未同步）
+ *              2) 切换 model 后旧 voice_id 依然保留（粒度错位）
+ *              3) v3.5 无预置音色时模板出现两套提示词（渲染/判定条件不一致）
  */
 import { ref, reactive, computed, onMounted, watch } from "vue";
 
@@ -145,12 +150,18 @@ const tts = reactive({
     proxy_url: "",
 });
 
-// 每个供应商单独保存 Key / GroupID / VoiceID / Model
+// 每个供应商单独保存 Key / GroupID / Model
 const apiKeys  = reactive<Record<string, string>>({});
 const groupIds = reactive<Record<string, string>>({});
-const voiceIds = reactive<Record<string, string>>({});
 // [FEAT-①] 每个供应商独立保存模型
 const models   = reactive<Record<string, string>>({});
+
+// ── [FIX-⑦] voice 状态按 voiceScopeKey 存储 ─────────────────
+// 阿里云下不同 model 的音色完全不兼容，必须按 provider+model 分桶；
+// MiniMax / ElevenLabs 下 voice 与 model 无关，按 provider 分桶即可。
+const voiceIds         = reactive<Record<string, string>>({});  // key = voiceScopeKey
+const customVoiceFlags = reactive<Record<string, boolean>>({}); // key = voiceScopeKey
+const customVoiceTexts = reactive<Record<string, string>>({});  // key = voiceScopeKey
 
 const currentKey = computed({
     get: () => apiKeys[tts.provider] ?? "",
@@ -159,10 +170,6 @@ const currentKey = computed({
 const currentGroupId = computed({
     get: () => groupIds[tts.provider] ?? "",
     set: (v) => { groupIds[tts.provider] = v; },
-});
-const currentVoiceId = computed({
-    get: () => voiceIds[tts.provider] ?? "",
-    set: (v) => { voiceIds[tts.provider] = v; },
 });
 
 // [FEAT-①] 当前供应商的模型
@@ -212,23 +219,53 @@ const effectiveModel = computed(() => {
     return currentModel.value;
 });
 
+// ── [FIX-⑦] voice 存储粒度 ────────────────────────────────────
+// 返回当前 provider+model 对应的 voice 存储 key
+function voiceScopeKey(provider: string, model: string): string {
+    // 阿里云：音色与模型强绑定，按 provider+model 分桶
+    if (provider === "aliyun_cosyvoice") {
+        // model 为空时退化为纯 provider（防止首帧 effectiveModel 尚未计算出来时 key 为 "xxx::"）
+        return model ? `${provider}::${model}` : provider;
+    }
+    // 其他供应商：voice 与 model 无关
+    return provider;
+}
+
+const currentScopeKey = computed(() => voiceScopeKey(tts.provider, effectiveModel.value));
+
 // ── 音色列表 ──────────────────────────────────────────────────
 const voices = ref<{ id: string; name: string; tags: string[] }[]>([]);
 const voicesLoading = ref(false);
-const customVoiceFlags = reactive<Record<string, boolean>>({});
-const customVoiceTexts = reactive<Record<string, string>>({});
+
+// [FIX-⑦] 所有 voice 相关 computed 都走 currentScopeKey
+const currentVoiceId = computed({
+    get: () => voiceIds[currentScopeKey.value] ?? "",
+    set: (v) => { voiceIds[currentScopeKey.value] = v; },
+});
 
 const useCustomVoice = computed({
-    get: () => customVoiceFlags[tts.provider] ?? false,
-    set: (v) => { customVoiceFlags[tts.provider] = v; },
+    get: () => customVoiceFlags[currentScopeKey.value] ?? false,
+    set: (v) => { customVoiceFlags[currentScopeKey.value] = v; },
 });
 const customVoiceId = computed({
-    get: () => customVoiceTexts[tts.provider] ?? "",
-    set: (v) => { customVoiceTexts[tts.provider] = v; },
+    get: () => customVoiceTexts[currentScopeKey.value] ?? "",
+    set: (v) => { customVoiceTexts[currentScopeKey.value] = v; },
 });
 
+// [FIX-⑦] 派生：当前 voice 输入区应处于哪种模式
+//   - "dropdown" 有预置列表且用户未主动切到手动：显示下拉
+//   - "custom"   无预置列表 或 用户主动切到手动：显示输入框
+// 整段模板 + hint 提示都以这个值为唯一判据，避免条件不一致的 bug
+const voiceInputMode = computed<"dropdown" | "custom">(() => {
+    if (voices.value.length === 0) return "custom";
+    return useCustomVoice.value ? "custom" : "dropdown";
+});
+
+// [FIX-⑦] 供模板读写："实际生效的 voice_id"
+//   - dropdown 模式：读 currentVoiceId
+//   - custom 模式：读 customVoiceId（已 trim）
 const effectiveVoiceId = computed(() => {
-    if (useCustomVoice.value) return customVoiceId.value.trim();
+    if (voiceInputMode.value === "custom") return customVoiceId.value.trim();
     return currentVoiceId.value;
 });
 
@@ -254,29 +291,11 @@ function loadConfig() {
         tts.proxy_url     = cfg.proxy_url ?? "";
         if (cfg.api_keys)  Object.assign(apiKeys,  cfg.api_keys);
         if (cfg.group_ids) Object.assign(groupIds, cfg.group_ids);
-        if (cfg.voice_ids) {
-            Object.assign(voiceIds, cfg.voice_ids);
-        } else if (cfg.voice_id && cfg.provider) {
-            voiceIds[cfg.provider] = cfg.voice_id;
-        }
-        if (cfg.custom_voice_flags) Object.assign(customVoiceFlags, cfg.custom_voice_flags);
-        if (cfg.custom_voice_texts) Object.assign(customVoiceTexts, cfg.custom_voice_texts);
 
-        // [FEAT-①] 恢复各供应商的模型
+        // [FEAT-①] 恢复各供应商的模型（必须先恢复，迁移 voice 数据时要用到）
         if (cfg.models) Object.assign(models, cfg.models);
         if (cfg.custom_model_flags) Object.assign(customModelFlags, cfg.custom_model_flags);
         if (cfg.custom_model_texts) Object.assign(customModelTexts, cfg.custom_model_texts);
-
-        // 兼容旧数据：如果某供应商没有 model，不做处理，留空则使用推荐默认值
-        // 如果 voice_id 不在内置列表中，标记为自定义
-        if (!(tts.provider in customVoiceFlags)) {
-            const vid = voiceIds[tts.provider] ?? "";
-            const builtinIds = getBuiltinVoicesFor(tts.provider, effectiveModel.value).map(v => v.id);
-            if (vid && !builtinIds.includes(vid)) {
-                customVoiceFlags[tts.provider] = true;
-                customVoiceTexts[tts.provider] = vid;
-            }
-        }
 
         // 如果 model 不在预设列表中，标记为自定义
         if (!(tts.provider in customModelFlags)) {
@@ -288,10 +307,86 @@ function loadConfig() {
             }
         }
 
+        // [FIX-⑦] voice 数据加载：新格式直接读，旧格式执行一次迁移
+        //   旧格式：voice_ids: { aliyun_cosyvoice: "xxx" }        (扁平，key = provider)
+        //   新格式：voice_ids: { "aliyun_cosyvoice::cosyvoice-v3-flash": "xxx" }
+        //
+        // 迁移策略：对于 aliyun 的旧扁平 voice，迁移到「当前已保存 model」对应的新 key 下；
+        //   若当前没有保存 model，则迁到该供应商的推荐默认 model。
+        //   其他供应商的 key 本身就是 provider，新旧结构兼容，无需迁移。
+        const voiceIdsRaw         = cfg.voice_ids         ?? {};
+        const customVoiceFlagsRaw = cfg.custom_voice_flags ?? {};
+        const customVoiceTextsRaw = cfg.custom_voice_texts ?? {};
+
+        // 先把所有明确带 "::" 的新格式键原样拷贝
+        for (const [k, v] of Object.entries(voiceIdsRaw)) {
+            if (k.includes("::")) voiceIds[k] = v as string;
+        }
+        for (const [k, v] of Object.entries(customVoiceFlagsRaw)) {
+            if (k.includes("::")) customVoiceFlags[k] = v as boolean;
+        }
+        for (const [k, v] of Object.entries(customVoiceTextsRaw)) {
+            if (k.includes("::")) customVoiceTexts[k] = v as string;
+        }
+
+        // 再处理旧的扁平 key
+        for (const [k, v] of Object.entries(voiceIdsRaw)) {
+            if (k.includes("::")) continue;
+            if (k === "aliyun_cosyvoice") {
+                // 旧数据 → 迁到当前保存 model（或推荐默认 model）对应的新 key
+                const migrateModel = models["aliyun_cosyvoice"] || getDefaultModel("aliyun_cosyvoice");
+                const newKey = voiceScopeKey("aliyun_cosyvoice", migrateModel);
+                if (!(newKey in voiceIds)) voiceIds[newKey] = v as string;
+                console.log(`[TTSTab] 迁移旧 voice_id | "${k}" → "${newKey}" = "${v}"`);
+            } else {
+                voiceIds[k] = v as string;
+            }
+        }
+        for (const [k, v] of Object.entries(customVoiceFlagsRaw)) {
+            if (k.includes("::")) continue;
+            if (k === "aliyun_cosyvoice") {
+                const migrateModel = models["aliyun_cosyvoice"] || getDefaultModel("aliyun_cosyvoice");
+                const newKey = voiceScopeKey("aliyun_cosyvoice", migrateModel);
+                if (!(newKey in customVoiceFlags)) customVoiceFlags[newKey] = v as boolean;
+            } else {
+                customVoiceFlags[k] = v as boolean;
+            }
+        }
+        for (const [k, v] of Object.entries(customVoiceTextsRaw)) {
+            if (k.includes("::")) continue;
+            if (k === "aliyun_cosyvoice") {
+                const migrateModel = models["aliyun_cosyvoice"] || getDefaultModel("aliyun_cosyvoice");
+                const newKey = voiceScopeKey("aliyun_cosyvoice", migrateModel);
+                if (!(newKey in customVoiceTexts)) customVoiceTexts[newKey] = v as string;
+            } else {
+                customVoiceTexts[k] = v as string;
+            }
+        }
+
+        // 更旧的数据（没有 voice_ids，只有顶层 voice_id）：也按 provider+currentModel 迁
+        if (!cfg.voice_ids && cfg.voice_id && cfg.provider) {
+            const migrateModel = models[cfg.provider] || getDefaultModel(cfg.provider);
+            const newKey = voiceScopeKey(cfg.provider, migrateModel);
+            if (!(newKey in voiceIds)) voiceIds[newKey] = cfg.voice_id;
+            console.log(`[TTSTab] 迁移顶层旧 voice_id → "${newKey}" = "${cfg.voice_id}"`);
+        }
+
+        // 对当前 scope：如果当前 voice_id 不在预置列表中，自动标记为自定义
+        const curKey = voiceScopeKey(tts.provider, effectiveModel.value);
+        if (!(curKey in customVoiceFlags)) {
+            const vid = voiceIds[curKey] ?? "";
+            const builtinIds = getBuiltinVoicesFor(tts.provider, effectiveModel.value).map(v => v.id);
+            if (vid && !builtinIds.includes(vid)) {
+                customVoiceFlags[curKey] = true;
+                customVoiceTexts[curKey] = vid;
+            }
+        }
+
         console.log(
             "[TTSTab] 配置已加载 | enabled=", tts.enabled,
             " provider=", tts.provider,
             " model=", effectiveModel.value,
+            " scopeKey=", curKey,
             " voice_id=", effectiveVoiceId.value,
             " proxy_enabled=", tts.proxy_enabled,
         );
@@ -327,6 +422,7 @@ function loadVoicesForProviderAndModel(provider: string, model: string) {
         return;
     }
     voices.value = [];
+    console.log(`[TTSTab] 无预置音色列表 | provider=${provider} model=${model}（将显示手动输入）`);
 }
 
 async function fetchVoicesFromBackend() {
@@ -359,19 +455,20 @@ async function saveTTS() {
 
     console.log(
         `[TTSTab] saveTTS | provider=${tts.provider} model="${finalModel}" `
-        + `voice="${finalVoiceId}" proxy="${proxyValue || '(空)'}"`
+        + `scopeKey="${currentScopeKey.value}" voice="${finalVoiceId}" `
+        + `inputMode=${voiceInputMode.value} proxy="${proxyValue || '(空)'}"`
     );
 
     // 组装持久化配置
     const storedCfg = {
         mode,
         provider:           tts.provider,
-        voice_id:           finalVoiceId,
+        voice_id:           finalVoiceId,   // 顶层冗余，方便旧代码兼容读取
         model:              finalModel,
-        voice_ids:          { ...voiceIds },
+        voice_ids:          { ...voiceIds },           // [FIX-⑦] 细粒度 key 结构
         models:             { ...models },
-        custom_voice_flags: { ...customVoiceFlags },
-        custom_voice_texts: { ...customVoiceTexts },
+        custom_voice_flags: { ...customVoiceFlags },   // [FIX-⑦]
+        custom_voice_texts: { ...customVoiceTexts },   // [FIX-⑦]
         custom_model_flags: { ...customModelFlags },
         custom_model_texts: { ...customModelTexts },
         base_url:           tts.base_url,
@@ -478,25 +575,27 @@ watch(() => tts.provider, (newProvider) => {
     loadVoicesForProviderAndModel(newProvider, effectiveModel.value);
     console.log(
         `[TTSTab] 供应商切换 → ${newProvider} | model="${effectiveModel.value}" `
-        + `voice="${currentVoiceId.value}"`
+        + `scopeKey="${currentScopeKey.value}" voice="${currentVoiceId.value}" `
+        + `custom="${customVoiceId.value}"`
     );
 });
 
-// ── [FEAT-①] 阿里云模型切换时重新加载音色列表 ─────────────────
+// ── [FIX-⑦] 阿里云模型切换时：重载音色列表，但 voice 状态自动隔离 ─
+// 注意：旧版本在这里会主动把 currentVoiceId 清空，那是因为粒度错位才需要的"救场逻辑"。
+// 新版本 voice 按 provider+model 分桶存储，切 model 时 scopeKey 会自动切到另一个桶，
+// 旧 model 下的 voice 配置完整保留，不需要也不应该清空。
 watch(effectiveModel, (newModel, oldModel) => {
     if (tts.provider !== "aliyun_cosyvoice") return;
     if (!newModel || newModel === oldModel) return;
 
     const newVoices = ALIYUN_VOICES_BY_MODEL[newModel] ?? [];
     voices.value = newVoices;
-    console.log(`[TTSTab] 阿里云模型切换 → ${newModel} | 音色数=${newVoices.length}`);
-
-    // 如果当前选中的 voice_id 不在新模型的音色列表中，清空选择
-    const currentVid = currentVoiceId.value;
-    if (currentVid && !newVoices.find(v => v.id === currentVid)) {
-        console.log(`[TTSTab] voice_id "${currentVid}" 不支持模型 ${newModel}，已清空`);
-        currentVoiceId.value = "";
-    }
+    console.log(
+        `[TTSTab] 阿里云模型切换 | ${oldModel} → ${newModel} | 音色数=${newVoices.length} `
+        + `新 scopeKey="${currentScopeKey.value}" `
+        + `该 scope 下 voice="${currentVoiceId.value}" custom="${customVoiceId.value}" `
+        + `inputMode=${voiceInputMode.value}`
+    );
 });
 
 // ── 切换自定义模式时同步 ─────────────────────────────────────
@@ -645,14 +744,14 @@ onMounted(async () => {
                 </p>
             </div>
 
-            <!-- ── 音色选择 ────────────────────────────────── -->
+            <!-- ── 音色选择 [FIX-⑦] 统一用 voiceInputMode 判定 ─ -->
             <div class="field-group">
                 <label class="field-label">音色
                     <span class="field-note">Voice</span>
                 </label>
 
-                <!-- 下拉选择区 -->
-                <div v-if="!useCustomVoice && voices.length > 0" class="voice-row">
+                <!-- 下拉选择区（仅在有预置列表 且 用户未切到手动时显示） -->
+                <div v-if="voiceInputMode === 'dropdown'" class="voice-row">
                     <select v-model="currentVoiceId" class="field-select">
                         <option value="">请选择音色…</option>
                         <option v-for="v in voices" :key="v.id" :value="v.id">
@@ -666,8 +765,8 @@ onMounted(async () => {
                     </button>
                 </div>
 
-                <!-- 自定义输入区 -->
-                <div v-if="useCustomVoice || voices.length === 0" class="voice-row">
+                <!-- 自定义输入区（无预置列表 或 用户主动切到手动） -->
+                <div v-else class="voice-row">
                     <input class="field-input" v-model="customVoiceId" type="text"
                            placeholder="手动输入音色 ID" />
                     <button v-if="voices.length > 0"
@@ -677,17 +776,24 @@ onMounted(async () => {
                     </button>
                 </div>
 
-                <!-- 自定义开关 -->
+                <!-- 自定义切换（仅当有预置列表时显示，无预置列表时手动是唯一选项） -->
                 <div v-if="voices.length > 0" class="custom-voice-toggle"
                      @click="useCustomVoice = !useCustomVoice">
                     {{ useCustomVoice ? '↩ 返回列表选择' : '✏️ 手动输入音色 ID' }}
                 </div>
 
-                <p v-if="useCustomVoice" class="field-hint">
+                <!-- [FIX-⑦] 提示词按 voiceInputMode 单向判定，避免出现两套提示 -->
+                <p v-if="voiceInputMode === 'custom' && voices.length === 0
+                         && tts.provider === 'aliyun_cosyvoice'"
+                   class="field-hint">
+                    ℹ️ 当前模型无预置系统音色，请在百炼控制台完成音色设计/克隆后，
+                    将音色 ID（形如 <code>cosyvoice-v3.5-flash-xxx-xxxxxxxx</code>）填入上方输入框。
+                </p>
+                <p v-else-if="voiceInputMode === 'custom'" class="field-hint">
                     可直接填写供应商提供的音色 ID，适用于克隆音色或列表中未包含的音色。
                 </p>
                 <p v-else-if="tts.provider === 'aliyun_cosyvoice'" class="field-hint">
-                    ℹ️ cosyvoice-3.5-plus/flash仅支持音色设计和音色克隆。
+                    ℹ️ 当前模型预置音色如上，如需使用复刻/设计音色请切换到手动输入。
                 </p>
             </div>
 
