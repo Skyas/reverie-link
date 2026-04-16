@@ -21,6 +21,12 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 import asyncio
+import logging
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s | %(levelname)-5s | %(name)s | %(message)s", datefmt="%H:%M:%S")
+logging.getLogger("openai").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("websocket").setLevel(logging.WARNING)
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware

@@ -1,11 +1,14 @@
 """
 Reverie Link · ElevenLabs 在线 TTS 适配器 (流式版)
+
+变更记录：
+  [FIX-⑤] 统一 proxy 参数：构造函数接收 proxy，synthesize 和 test_connection 使用同一代理
+           移除旧的 urllib.request.getproxies() 手动读取逻辑
 """
 
 import logging
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 
-import urllib.request
 import httpx
 
 from ..base import TTSEngineBase, VoiceInfo
@@ -48,10 +51,22 @@ class ElevenLabsEngine(TTSEngineBase):
         api_key: str,
         base_url: str = "",
         model: str = "eleven_flash_v2_5",
+        proxy: Optional[str] = None,
     ) -> None:
         self._api_key  = api_key
         self._base_url = (base_url or self.DEFAULT_BASE_URL).rstrip("/")
         self._model    = model
+        self._proxy    = proxy  # [FIX-⑤] 统一代理入口
+
+        if self._proxy:
+            logger.info(f"[ElevenLabs] 已配置代理: {self._proxy}")
+
+    def _make_client(self, timeout: float = 30.0) -> httpx.AsyncClient:
+        """创建统一的 httpx 客户端，确保 synthesize / test / list_voices 都走相同代理。"""
+        return httpx.AsyncClient(
+            timeout=timeout,
+            proxy=self._proxy,
+        )
 
     async def synthesize(
         self,
@@ -72,7 +87,6 @@ class ElevenLabsEngine(TTSEngineBase):
             },
         }
 
-        # 变更为流式 API 端点
         url = f"{self._base_url}/v1/text-to-speech/{voice_id}/stream"
         headers = {
             "xi-api-key":   self._api_key,
@@ -83,10 +97,11 @@ class ElevenLabsEngine(TTSEngineBase):
         logger.debug(
             f"[ElevenLabs] 发起流式合成 | model={self._model} "
             f"voice={voice_id} emotion={emotion} "
-            f"stability={settings['stability']} style={settings['style']}"
+            f"stability={settings['stability']} style={settings['style']} "
+            f"proxy={'Yes' if self._proxy else 'No'}"
         )
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with self._make_client(timeout=30.0) as client:
             async with client.stream("POST", url, headers=headers, json=payload) as resp:
                 if resp.status_code != 200:
                     await resp.aread()
@@ -94,7 +109,6 @@ class ElevenLabsEngine(TTSEngineBase):
                     logger.error(f"[ElevenLabs] API 错误 status={resp.status_code} body={body_preview}")
                     raise RuntimeError(f"ElevenLabs TTS 错误 {resp.status_code}: {body_preview}")
 
-                # 流式解析返回的音频块数据
                 async for chunk in resp.aiter_bytes():
                     if chunk:
                         yield chunk
@@ -103,7 +117,7 @@ class ElevenLabsEngine(TTSEngineBase):
         url = f"{self._base_url}/v1/voices"
         headers = {"xi-api-key": self._api_key}
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with self._make_client(timeout=15.0) as client:
                 resp = await client.get(url, headers=headers)
             if resp.status_code != 200:
                 logger.warning(f"[ElevenLabs] 获取音色列表失败 status={resp.status_code}")
@@ -118,6 +132,7 @@ class ElevenLabsEngine(TTSEngineBase):
                     engine="elevenlabs",
                     tags=v.get("labels", {}).get("use_case", "").split(","),
                 ))
+            logger.info(f"[ElevenLabs] 音色列表获取成功 | count={len(voices)}")
             return voices
         except Exception as e:
             logger.error(f"[ElevenLabs] 获取音色列表异常: {e}")
@@ -126,27 +141,25 @@ class ElevenLabsEngine(TTSEngineBase):
     async def is_ready(self) -> bool:
         return True
 
-    # ── 连通性测试 ─────────────────────────────────────────────────────
     async def test_connection(self) -> bool:
-        import urllib.request
-        
-        print(f"\n当前 ElevenLabs 引擎拿到的 API Key 是: '{self._api_key}'")
-        print(f"这个 Key 的长度是: {len(self._api_key)} 字符\n")
-        
-        # 【修改这里】将 /v1/user 改为获取模型列表的 /v1/models
-        # 从而完美兼容被限制了权限（仅支持 TTS）的 API Key
+        """
+        连通性测试：请求 /v1/models 验证 API Key 有效性。
+        [FIX-⑤] 使用统一 _make_client()，不再手动读系统代理。
+        """
         url = f"{self._base_url}/v1/models"
         headers = {"xi-api-key": self._api_key}
-        
-        sys_proxies = urllib.request.getproxies()
-        dynamic_proxy = sys_proxies.get("https") or sys_proxies.get("http")
+
+        logger.info(
+            f"[ElevenLabs] 连通性测试 | base_url={self._base_url} "
+            f"proxy={self._proxy or '直连'} key_len={len(self._api_key)}"
+        )
 
         try:
-            async with httpx.AsyncClient(timeout=10.0, proxy=dynamic_proxy) as client:
+            async with self._make_client(timeout=10.0) as client:
                 resp = await client.get(url, headers=headers)
             
             if resp.status_code == 200:
-                logger.info(f"[ElevenLabs] 连通性测试通过 (代理: {dynamic_proxy or '直连'})")
+                logger.info(f"[ElevenLabs] 连通性测试通过 (代理: {self._proxy or '直连'})")
                 return True
             elif resp.status_code == 401:
                 raise ValueError("API Key 无效或已被 ElevenLabs 拒绝 (HTTP 401)")
@@ -154,12 +167,13 @@ class ElevenLabsEngine(TTSEngineBase):
                 raise ValueError(f"HTTP 请求失败，状态码: {resp.status_code}")
 
         except httpx.ConnectError:
-            raise ValueError("网络连接被拒绝，如果开启了代理，请检查代理软件状态")
+            raise ValueError(
+                "网络连接被拒绝。如果你在国内，请在「高级选项」中配置 HTTP 代理后重试。"
+            )
         except httpx.TimeoutException:
             raise ValueError("网络连接超时，请检查网络或代理节点是否畅通")
-        except ValueError as ve:
-            # 放行已知的业务逻辑异常
-            raise ve
+        except ValueError:
+            raise
         except Exception as e:
             logger.warning(f"[ElevenLabs] 连通性测试异常: {e}")
             raise ValueError(f"未知异常: {repr(e)}")

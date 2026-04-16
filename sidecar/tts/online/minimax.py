@@ -1,10 +1,13 @@
 """
 Reverie Link · MiniMax Speech 2.8 在线 TTS 适配器 (流式版)
+
+变更记录：
+  [FIX-⑤] 构造函数接收 proxy 参数，httpx 统一使用
 """
 
 import json
 import logging
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 
 import httpx
 
@@ -46,12 +49,25 @@ class MiniMaxEngine(TTSEngineBase):
         api_key: str,
         group_id: str = "",
         base_url: str = "",
-        model: str = "speech-2.8-turbo",  # 升级至支持极低延迟与流式的 2.8 架构
+        model: str = "speech-2.8-turbo",
+        proxy: Optional[str] = None,
     ) -> None:
         self._api_key  = api_key
         self._group_id = group_id
         self._base_url = (base_url or self.DEFAULT_BASE_URL).rstrip("/")
         self._model    = model
+        self._proxy    = proxy
+
+        if self._proxy:
+            logger.info(f"[MiniMax] 已配置代理: {self._proxy}")
+
+    def _make_client(self, timeout: float = 30.0) -> httpx.AsyncClient:
+        """创建统一的 httpx 客户端。MiniMax 国内直连无需代理，但统一支持。"""
+        return httpx.AsyncClient(
+            timeout=timeout,
+            proxy=self._proxy,
+            trust_env=False,  # MiniMax 国内服务，不读系统代理
+        )
 
     async def synthesize(
         self,
@@ -65,9 +81,9 @@ class MiniMaxEngine(TTSEngineBase):
         payload: dict = {
             "model": self._model,
             "text": text,
-            "stream": True,  # 开启流式 SSE 输出
+            "stream": True,
             "stream_options": {
-                "exclude_aggregated_audio": True  # 防止结尾包包含全量数据导致瞬时带宽爆炸
+                "exclude_aggregated_audio": True
             },
             "voice_setting": {
                 "voice_id": voice_id,
@@ -98,7 +114,7 @@ class MiniMaxEngine(TTSEngineBase):
             f"voice={voice_id} emotion={emotion}→{mm_emotion}"
         )
 
-        async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
+        async with self._make_client(timeout=30.0) as client:
             async with client.stream("POST", url, headers=headers, json=payload) as resp:
                 if resp.status_code != 200:
                     await resp.aread()
@@ -106,7 +122,6 @@ class MiniMaxEngine(TTSEngineBase):
                     logger.error(f"[MiniMax] API 错误 status={resp.status_code} body={body_preview}")
                     raise RuntimeError(f"MiniMax TTS 错误 {resp.status_code}: {body_preview}")
 
-                # 解析 SSE 数据流
                 async for line in resp.aiter_lines():
                     line = line.strip()
                     if not line or not line.startswith("data:"):
@@ -124,12 +139,10 @@ class MiniMaxEngine(TTSEngineBase):
                             msg = base_resp.get("status_msg", "Unknown error")
                             raise RuntimeError(f"MiniMax 业务错误: {msg}")
 
-                        # 获取音频并解 Hex 转换成原始 mp3 bytes 返回
                         audio_hex = data_json.get("data", {}).get("audio", "")
                         if audio_hex:
                             yield bytes.fromhex(audio_hex)
                             
-                        # 状态 2 为流结束
                         status = data_json.get("data", {}).get("status", 0)
                         if status == 2:
                             break
@@ -144,7 +157,6 @@ class MiniMaxEngine(TTSEngineBase):
 
     async def test_connection(self) -> bool:
         try:
-            # 修改连接测试：拉取首块数据即成功断开
             async for chunk in self.synthesize("测试", "female-shaonv", "neutral"):
                 if chunk:
                     logger.info("[MiniMax] 连通性测试通过")

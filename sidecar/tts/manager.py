@@ -1,5 +1,9 @@
 """
 Reverie Link · TTSManager — TTS 路由层
+
+变更记录：
+  [FIX-⑤] configure() 接收 proxy 字段，传递给各在线引擎
+  [FEAT-①] configure() 接收 model 字段，透传给各引擎构造函数
 """
 
 import logging
@@ -18,7 +22,8 @@ class TTSManager:
         self._config: dict = {}
         self._mode: str = "disabled"      
         self._provider: str = ""           
-        self._voice_id: str = ""           
+        self._voice_id: str = ""
+        self._model: str = ""
         self._error: str = ""              
 
     def configure(self, config: dict) -> None:
@@ -26,6 +31,7 @@ class TTSManager:
         self._mode     = config.get("mode", "disabled")
         self._provider = config.get("provider", "")
         self._voice_id = config.get("voice_id", "")
+        self._model    = config.get("model", "")
         self._engine   = None
         self._error    = ""
 
@@ -46,6 +52,9 @@ class TTSManager:
         api_key  = config.get("api_key", "").strip()
         base_url = config.get("base_url", "").strip()
         provider = config.get("provider", "").strip()
+        model    = config.get("model", "").strip()
+        # [FIX-⑤] 代理地址：前端仅在开关开启且有地址时才传非空值
+        proxy    = config.get("proxy", "").strip()
 
         if not api_key:
             self._mode  = "disabled"
@@ -53,26 +62,44 @@ class TTSManager:
             logger.warning(f"[TTSManager] {self._error}，进入无语音模式")
             return
 
+        if proxy:
+            logger.info(f"[TTSManager] 使用 HTTP 代理: {proxy}")
+        else:
+            logger.debug("[TTSManager] 未配置代理，直连模式")
+
         try:
             if provider == "minimax":
                 from .online.minimax import MiniMaxEngine
-                self._engine = MiniMaxEngine(
+                # [FEAT-①] model 为空时交由引擎使用自己的默认值
+                kwargs = dict(
                     api_key=api_key,
                     group_id=config.get("group_id", "").strip(),
                     base_url=base_url or "",
+                    proxy=proxy or None,
                 )
+                if model:
+                    kwargs["model"] = model
+                self._engine = MiniMaxEngine(**kwargs)
             elif provider == "elevenlabs":
                 from .online.elevenlabs import ElevenLabsEngine
-                self._engine = ElevenLabsEngine(
+                kwargs = dict(
                     api_key=api_key,
                     base_url=base_url or "",
+                    proxy=proxy or None,
                 )
+                if model:
+                    kwargs["model"] = model
+                self._engine = ElevenLabsEngine(**kwargs)
             elif provider == "aliyun_cosyvoice":
                 from .online.aliyun import AliyunCosyVoiceEngine
-                self._engine = AliyunCosyVoiceEngine(
+                kwargs = dict(
                     api_key=api_key,
                     base_url=base_url or "",
+                    proxy=proxy or None,
                 )
+                if model:
+                    kwargs["model"] = model
+                self._engine = AliyunCosyVoiceEngine(**kwargs)
             else:
                 self._mode  = "disabled"
                 self._error = f"未知在线供应商: {provider}"
@@ -80,7 +107,8 @@ class TTSManager:
 
             logger.info(
                 f"[TTSManager] 在线引擎已构建 | provider={provider} "
-                f"voice_id={self._voice_id} has_key=True"
+                f"model={model or '(默认)'} voice_id={self._voice_id} "
+                f"has_key=True proxy={'Yes' if proxy else 'No'}"
             )
         except Exception as e:
             self._mode  = "disabled"
@@ -112,15 +140,14 @@ class TTSManager:
             async for chunk in self._engine.synthesize(text, effective_voice, emotion):
                 yield chunk
         except Exception as e:
-            # 1. 改用 repr(e) 获取具体的异常类型（比如 TimeoutError() 而不是空）
-            # 2. 加入 exc_info=True 强制打印报错发生在哪一行
             logger.error(f"[TTSManager] 合成失败 | provider={self._provider} error={repr(e)}", exc_info=True)
             import traceback
             print("================ TTS 报错拉响警报 ================")
             print(f"当前 Provider: {self._provider}")
+            print(f"当前 Model:    {self._model}")
             print(f"错误摘要: {repr(e)}")
             print("完整堆栈:")
-            traceback.print_exc()  # 这句会把详细的报错行号直接打印出来
+            traceback.print_exc()
             print("==================================================")
             return
 
@@ -148,6 +175,7 @@ class TTSManager:
             "mode":       self._mode,
             "provider":   self._provider,
             "voice_id":   self._voice_id,
+            "model":      self._model,
             "ready":      ready,
             "error":      self._error,
             "label":      self._status_label(),
@@ -164,6 +192,8 @@ class TTSManager:
             "aliyun_cosyvoice": "阿里云 CosyVoice",
         }
         name = provider_names.get(self._provider, self._provider)
+        if self._model:
+            return f"● 就绪  {name} · {self._model}"
         return f"● 就绪  {name}"
 
     @property

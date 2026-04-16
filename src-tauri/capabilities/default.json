@@ -11,7 +11,12 @@
     "core:window:allow-set-position",
     "core:window:allow-outer-position",
     "core:window:allow-outer-size",
-    "opener:allow-open-url",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://*" }
+      ]
+    },
     "opener:allow-open-path",
     "opener:allow-reveal-item-in-dir"
   ]
