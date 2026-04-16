@@ -1,6 +1,9 @@
 /**
  * useTTS.ts — 语音合成 + 音频播放 + 唇音同步（重构版）
  *
+ * 变更记录：
+ *   [FIX-⑤] getBackendTTSConfig() 传递 proxy 字段
+ *
  * 职责：
  *   - 从 localStorage 读取 TTS 配置，在应用启动时同步给后端
  *   - 调用后端统一接口 POST /tts/synthesize 获取音频
@@ -36,6 +39,8 @@ function getBackendTTSConfig(): Record<string, string> | null {
             api_key:  (cfg.api_keys ?? {})[cfg.provider ?? ""] ?? "",
             voice_id: cfg.voice_id ?? "",
             base_url: cfg.base_url ?? "",
+            // [FIX-⑤] 代理：开关开启且有地址时才传
+            proxy:    (cfg.proxy_enabled && cfg.proxy_url) ? cfg.proxy_url : "",
         };
         if (cfg.provider === "minimax") {
             backendCfg.group_id = (cfg.group_ids ?? {})["minimax"] ?? "";
@@ -52,10 +57,6 @@ export function useTTS({ setMouthOpen }: TTSDeps) {
     let currentAudio: HTMLAudioElement | null  = null;
 
     // ── 启动时同步配置到后端 ──────────────────────────────────────
-    /**
-     * 在 onMounted 后调用，将 localStorage 中保存的 TTS 配置推送给后端。
-     * 避免后端重启后配置丢失导致的无语音状态。
-     */
     async function syncConfigToBackend(): Promise<void> {
         const cfg = getBackendTTSConfig();
         if (!cfg) {
@@ -123,15 +124,10 @@ export function useTTS({ setMouthOpen }: TTSDeps) {
     }
 
     // ── 合成并播放（新版，调用统一后端接口）─────────────────────
-    /**
-     * 合成语音并播放。
-     * @param text    已从 LLM 回复中提取的文本（含或不含情感标签均可，后端会忽略）
-     * @param emotion 标准情感标签（由前端从 LLM 回复中解析），缺省 "neutral"
-     */
     async function speakText(text: string, emotion: string = "neutral"): Promise<void> {
         if (!text.trim()) return;
 
-        stopTTS(); // 停止上一条语音
+        stopTTS();
 
         try {
             const res = await fetch(`${BACKEND_BASE}/tts/synthesize`, {
@@ -140,7 +136,6 @@ export function useTTS({ setMouthOpen }: TTSDeps) {
                 body:    JSON.stringify({ text: text.trim(), emotion }),
             });
 
-            // 204 = 无语音模式，静默跳过
             if (res.status === 204) {
                 console.debug("[TTS] 无语音模式，跳过播放");
                 return;

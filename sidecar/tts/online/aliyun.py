@@ -1,15 +1,14 @@
 """
 Reverie Link · 阿里云 CosyVoice API 在线 TTS 适配器 (流式 WebSocket 版)
 
-API 文档：https://help.aliyun.com/zh/model-studio/cosyvoice-api
-模型：cosyvoice-v3-flash（支持流式、支持高自然度情感控制）
-依赖：pip install websockets
+变更记录：
+  [FIX-⑤] 构造函数接收 proxy 参数，WebSocket 连接支持通过 SOCKS/HTTP 代理
 """
 
 import json
 import uuid
 import logging
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 
 import websockets
 
@@ -17,7 +16,7 @@ from ..base import TTSEngineBase, VoiceInfo
 
 logger = logging.getLogger(__name__)
 
-# 情感标签 → 自然语言指令映射（通过 instruction 字段下发）
+# 情感标签 → 自然语言指令映射
 _EMOTION_PROMPTS: dict[str, str] = {
     "neutral":   "",                      
     "happy":     "用开心愉快的语气说，",
@@ -42,20 +41,16 @@ _EMOTION_PROMPTS: dict[str, str] = {
     "sigh":      "用叹气疲惫的语气说，",
 }
 
-# 内置预设音色（部分）
+# 内置预设音色
 _BUILTIN_VOICES: list[VoiceInfo] = [
-    VoiceInfo(id="longxiaochun",   name="龙小淳",   engine="aliyun_cosyvoice", tags=["中文", "女声", "温柔"]),
-    VoiceInfo(id="longxiaochun_v2",name="龙小淳V2", engine="aliyun_cosyvoice", tags=["中文", "女声", "温柔"]),
-    VoiceInfo(id="longwan",        name="龙婉",     engine="aliyun_cosyvoice", tags=["中文", "女声", "成熟"]),
-    VoiceInfo(id="longwan_v2",     name="龙婉V2",   engine="aliyun_cosyvoice", tags=["中文", "女声", "成熟"]),
-    VoiceInfo(id="loongstella",    name="Stella",   engine="aliyun_cosyvoice", tags=["中英文", "女声"]),
-    VoiceInfo(id="longshu",        name="龙书",     engine="aliyun_cosyvoice", tags=["中文", "男声"]),
-    VoiceInfo(id="longjing",       name="龙静",     engine="aliyun_cosyvoice", tags=["中文", "女声", "新闻"]),
-    VoiceInfo(id="longhua",        name="龙华",     engine="aliyun_cosyvoice", tags=["中文", "男声", "新闻"]),
+    VoiceInfo(id="longanyang",   name="龙安洋",   engine="aliyun_cosyvoice", tags=["中文", "男声", "阳光"]),
+    VoiceInfo(id="longanhuan",   name="龙安欢",   engine="aliyun_cosyvoice", tags=["中文", "女声", "元气"]),
+    VoiceInfo(id="longhuhu_v3",  name="龙呼呼",   engine="aliyun_cosyvoice", tags=["中文", "女声", "童声"]),
 ]
 
 # 阿里云大模型（百炼） WebSocket 接口地址
-_DASHSCOPE_WS_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference"
+_DASHSCOPE_WS_URL ='wss://dashscope.aliyuncs.com/api-ws/v1/inference'
+_DASHSCOPE_HTTP_URL = 'https://dashscope.aliyuncs.com/api/v1'
 
 
 class AliyunCosyVoiceEngine(TTSEngineBase):
@@ -67,56 +62,83 @@ class AliyunCosyVoiceEngine(TTSEngineBase):
         self,
         api_key: str,
         base_url: str = "",
-        model: str = "cosyvoice-v3-flash",  # 默认使用支持情感控制的 V3 Flash 模型
+        model: str = "cosyvoice-v3-flash",
+        proxy: Optional[str] = None,
     ) -> None:
         self._api_key  = api_key
         self._ws_url   = (base_url or _DASHSCOPE_WS_URL).rstrip("/")
         self._model    = model
+        self._proxy    = proxy
 
-    # ── 合成 (流式生成器) ───────────────────────────────────────────────
+        if self._proxy:
+            logger.info(f"[AliyunCosyVoice] 已配置代理: {self._proxy}")
+
     async def synthesize(
         self,
         text: str,
         voice_id: str,
         emotion: str = "neutral",
     ) -> AsyncGenerator[bytes, None]:
-        """
-        调用 DashScope CosyVoice WebSocket API，流式返回音频二进制片段。
-        """
         task_id = uuid.uuid4().hex
-        emotion_instruction = _EMOTION_PROMPTS.get(emotion, "")
+        
+        # v3 模型不再支持通过 instruction 参数传入情感，改用 SSML。
+        # 为保证基础连通性，这里暂不将文本包装为 SSML，先使用纯文本模式。
 
-        # 构造符合阿里云流式协议的 Payload
-        payload = {
+        # 1. Start Task 
+        run_payload = {
             "header": {
                 "action": "run-task",
                 "task_id": task_id,
-                "streaming": "in"
+                "streaming": "duplex"
             },
             "payload": {
                 "model": self._model,
                 "task_group": "audio",
                 "task": "tts",
                 "function": "SpeechSynthesizer",
-                "input": {
-                    "text": text,  # 仅传入正文
-                },
+                "input": {},
                 "parameters": {
+                    "text_type": "PlainText",  # [必填修复] 声明文本类型
                     "voice": voice_id,
-                    "format": "wav",  # 流式播放时，如果播放器不支持 WAV 流，可考虑换成 "pcm"
+                    "format": "mp3",           # [建议修正] 与官方对齐，使用前端兼容性最好的 mp3
                     "sample_rate": 22050,
-                    "volume": 100,
+                    "volume": 50,              # 与官方对齐，音量设为 50
+                    "rate": 1,                 # [必填修复] 语速
+                    "pitch": 1                 # [必填修复] 音调
                 }
             }
         }
 
-        # 注入情感指令
-        if emotion_instruction:
-            payload["payload"]["parameters"]["instruction"] = emotion_instruction
+        # 2. Continue Task (发送文本)
+        continue_payload = {
+            "header": {
+                "action": "continue-task",
+                "task_id": task_id,
+                "streaming": "duplex"
+            },
+            "payload": {
+                "input": {
+                    "text": text
+                }
+            }
+        }
+
+        # 3. Finish Task (结束标识)
+        finish_payload = {
+            "header": {
+                "action": "finish-task",
+                "task_id": task_id,
+                "streaming": "duplex"
+            },
+            "payload": {
+                "input": {}
+            }
+        }
 
         logger.debug(
             f"[AliyunCosyVoice] 发起流式合成 | task_id={task_id[:8]} "
-            f"model={self._model} voice={voice_id} emotion={emotion}"
+            f"model={self._model} voice={voice_id} "
+            f"proxy={'Yes' if self._proxy else 'No'}"
         )
 
         headers = {
@@ -125,34 +147,46 @@ class AliyunCosyVoiceEngine(TTSEngineBase):
         }
 
         try:
-            # 建立 WebSocket 连接
-            async with websockets.connect(
-                self._ws_url,
-                extra_headers=headers,
-                ping_interval=20,  # 保持连接活跃
-                ping_timeout=20
-            ) as ws:
-                # 1. 发送合成请求
-                await ws.send(json.dumps(payload))
+            ws_kwargs: dict = {
+                "additional_headers": headers,
+                "ping_interval": 20,
+                "ping_timeout": 20,
+            }
+            
+            if self._proxy:
+                try:
+                    ws_kwargs["proxy"] = self._proxy
+                except Exception:
+                    logger.warning("[AliyunCosyVoice] websockets 版本不支持 proxy 参数，将直连")
 
-                # 2. 循环接收服务器返回的帧
+            async with websockets.connect(self._ws_url, **ws_kwargs) as ws:
+                
+                # 1. 发送初始化指令
+                await ws.send(json.dumps(run_payload))
+
+                # 2. 监听服务端响应
                 async for msg in ws:
                     if isinstance(msg, bytes):
-                        # 服务器返回的是二进制数据（音频帧），直接 yield 抛给上层
+                        # 收到了音频二进制数据
                         yield msg
                         
                     elif isinstance(msg, str):
-                        # 服务器返回的是文本数据（状态控制帧）
                         data = json.loads(msg)
                         header = data.get("header", {})
-                        action = header.get("action")
+                        event = header.get("event")
 
-                        if action == "task-started":
-                            logger.debug("[AliyunCosyVoice] 服务器开始处理任务 (TTFB)")
-                        elif action == "task-finished":
-                            logger.debug("[AliyunCosyVoice] 音频流接收完毕")
-                            break  # 正常结束流
-                        elif action == "task-failed":
+                        if event == "task-started":
+                            logger.debug("[AliyunCosyVoice] 收到 task-started，开始推送文本...")
+                            # 3. 收到就绪信号后，推送文本并结束
+                            await ws.send(json.dumps(continue_payload))
+                            await ws.send(json.dumps(finish_payload))
+                            
+                        elif event == "result-generated":
+                            pass
+                        elif event == "task-finished":
+                            logger.debug("[AliyunCosyVoice] 任务完成，正常关闭连接")
+                            break
+                        elif event == "task-failed":
                             error_msg = header.get("error_message", str(data))
                             logger.error(f"[AliyunCosyVoice] 合成失败: {error_msg}")
                             raise RuntimeError(f"流式合成失败: {error_msg}")
@@ -160,21 +194,16 @@ class AliyunCosyVoiceEngine(TTSEngineBase):
         except websockets.exceptions.WebSocketException as e:
             logger.error(f"[AliyunCosyVoice] WebSocket 连接异常: {e}")
             raise RuntimeError(f"WebSocket 异常: {str(e)}")
-
-    # ── 音色列表 ──────────────────────────────────────────────────────
+        
     async def list_voices(self) -> list[VoiceInfo]:
-        """返回内置预设音色列表"""
         return list(_BUILTIN_VOICES)
 
-    # ── 就绪状态 ──────────────────────────────────────────────────────
     async def is_ready(self) -> bool:
         return True
 
-    # ── 连通性测试 ─────────────────────────────────────────────────────
     async def test_connection(self) -> bool:
         try:
-            # 对于流式接口，我们可以简单拉取第一块数据就断开，以验证连通性
-            async for chunk in self.synthesize("测试", "longxiaochun", "neutral"):
+            async for chunk in self.synthesize("测试", "longanyang", "neutral"):
                 if chunk:
                     return True
             return False
