@@ -11,6 +11,8 @@ import json
 from pathlib import Path
 
 from fastapi import APIRouter
+import logging
+logger = logging.getLogger(__name__)
 
 # ── 路径常量（相对于项目根目录）─────────────────────────────────
 # 本文件位于 sidecar/routers/live2d.py，向上三层到项目根
@@ -32,7 +34,7 @@ async def get_folder_paths():
     live2d_path_str = os.path.normpath(str(live2d_dir))
     rvc_path_str = os.path.normpath(str(rvc_dir))
 
-    print(f"[FolderPaths] live2d={live2d_path_str} rvc={rvc_path_str}")
+    logger.info("[FolderPaths] live2d=%s rvc=%s", live2d_path_str, rvc_path_str)
     return {
         "live2d": live2d_path_str,
         "rvc":    rvc_path_str,
@@ -62,12 +64,12 @@ async def list_live2d_models():
         try:
             _auto_fix_motions(folder, model_file)
         except Exception as e:
-            print(f"[AutoFix] {folder.name} 修复失败（跳过）: {e}")
+            logger.warning("[AutoFix] %s 修复失败（跳过）: %s", folder.name, e)
 
         try:
             _optimize_idle_fade(folder, model_file)
         except Exception as e:
-            print(f"[AutoFix] {folder.name} idle 优化失败（跳过）: {e}")
+            logger.warning("[AutoFix] %s idle 优化失败（跳过）: %s", folder.name, e)
 
         display_name = folder.name.replace("_", " ").replace("-", " ")
         models.append({
@@ -125,7 +127,7 @@ def _auto_fix_motions(folder: Path, model_file: Path) -> None:
     with open(model_file, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent="\t")
 
-    print(f"[AutoFix] {folder.name}: 自动注入 Motions（idle={idle_file.name}，共 {len(motion_files)} 个动作）")
+    logger.info("[AutoFix] %s: 自动注入 Motions（idle=%s，共 %s 个动作）", folder.name, idle_file.name, len(motion_files))
 
 
 def _optimize_idle_fade(folder: Path, model_file: Path) -> None:
@@ -177,5 +179,4 @@ def _optimize_idle_fade(folder: Path, model_file: Path) -> None:
     with open(model_file, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent="\t")
 
-    print(f"[AutoFix] {folder.name}: 检测到帧切换型 idle（全部 Duration < {DURATION_THRESHOLD}s），"
-          f"已精简为 1 个动作并禁用 crossfade")
+    logger.info("[AutoFix] %s: 检测到帧切换型 idle（全部 Duration < %ss），已精简为 1 个动作并禁用 crossfade", folder.name, DURATION_THRESHOLD)

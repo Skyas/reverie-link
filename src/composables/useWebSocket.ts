@@ -51,6 +51,7 @@ export function useWebSocket(callbacks: WebSocketCallbacks) {
     // ── 发送配置 ──────────────────────────────────────────────────────
     function sendConfigure(payload: ConfigurePayload) {
         if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        console.debug("[WS] 发送 configure", payload);
         ws.send(JSON.stringify({
             type:         "configure",
             llm:          payload.llm          ?? {},
@@ -67,7 +68,11 @@ export function useWebSocket(callbacks: WebSocketCallbacks) {
     function autoSendStoredConfig() {
         const savedLLM  = localStorage.getItem("rl-llm");
         const savedChar = localStorage.getItem("rl-character");
-        if (!savedLLM && !savedChar) return;
+        if (!savedLLM && !savedChar) {
+            console.debug("[WS] autoSendStoredConfig: 无已保存配置，跳过");
+            return;
+        }
+        console.debug("[WS] autoSendStoredConfig: 读取到已保存配置，发送 configure");
 
         const llmCfg  = savedLLM  ? JSON.parse(savedLLM)  : {};
         const charCfg = savedChar ? JSON.parse(savedChar) : {};
@@ -91,8 +96,19 @@ export function useWebSocket(callbacks: WebSocketCallbacks) {
 
     // ── 发送消息 ──────────────────────────────────────────────────────
     function sendMessage(msg: string) {
-        if (!msg.trim() || !isConnected.value || isThinking.value) return;
-
+        if (!msg.trim()) {
+            console.warn("[WS] sendMessage: 空消息，忽略");
+            return;
+        }
+        if (!isConnected.value) {
+            console.warn("[WS] sendMessage: 无 WebSocket 连接，忽略");
+            return;
+        }
+        if (isThinking.value) {
+            console.warn("[WS] sendMessage: AI 正在回复中，忽略");
+            return;
+        }
+        console.debug("[WS] sendMessage", msg);
         isThinking.value = true;
 
         if (thinkingTimer) clearTimeout(thinkingTimer);
@@ -108,50 +124,66 @@ export function useWebSocket(callbacks: WebSocketCallbacks) {
 
     // ── 消息处理 ──────────────────────────────────────────────────────
     function handleMessage(event: MessageEvent) {
-        const data = JSON.parse(event.data);
+        let data: any;
+        try {
+            data = JSON.parse(event.data);
+        } catch (e) {
+            console.error("[WS] JSON 解析失败: %s | 原始数据: %r", e, event.data);
+            return;
+        }
 
         if (data.type === "chat_response") {
             isThinking.value = false;
             if (thinkingTimer) { clearTimeout(thinkingTimer); thinkingTimer = null; }
             const { cleanText, emotion } = parseEmotion(data.message);
-            console.log("[chat emotion]", emotion, cleanText);
+            console.info("[WS] chat_response | emotion=%s len=%s", emotion, cleanText.length);
             callbacks.onChatResponse(cleanText, emotion);
 
         } else if (data.type === "vision_proactive_speech") {
             // 视觉感知主动发言：仅在用户未等待回复时处理（不打断思考状态）
             if (!isThinking.value) {
                 const { cleanText, emotion } = parseEmotion(data.message);
-                console.log('[emotion]', emotion, cleanText)
+                console.info("[WS] vision_proactive_speech | emotion=%s len=%s", emotion, cleanText.length);
                 callbacks.onVisionSpeech(cleanText, emotion);
             }
 
         } else if (data.type === "error") {
             isThinking.value = false;
             if (thinkingTimer) { clearTimeout(thinkingTimer); thinkingTimer = null; }
+            console.error("[WS] error: %s", data.message);
             callbacks.onError(data.message);
+        } else {
+            console.warn("[WS] 未知消息类型: %s", data.type);
         }
     }
 
     // ── 连接管理 ──────────────────────────────────────────────────────
     function connectWS() {
+        console.info("[WS] 正在连接... | url=%s", WS_URL);
         ws = new WebSocket(WS_URL);
 
         ws.onopen = () => {
             isConnected.value = true;
+            console.info("[WS] 已连接 | url=%s", WS_URL);
             autoSendStoredConfig();
         };
 
         ws.onclose = () => {
             isConnected.value = false;
+            console.warn("[WS] 连接已关闭，%sms 后重连", RECONNECT_DELAY_MS);
             setTimeout(connectWS, RECONNECT_DELAY_MS);
         };
 
-        ws.onerror = () => { ws?.close(); };
+        ws.onerror = () => {
+            console.error("[WS] 连接错误");
+            ws?.close();
+        };
 
         ws.onmessage = handleMessage;
     }
 
     function disconnectWS() {
+        console.info("[WS] 主动断开连接");
         ws?.close();
     }
 

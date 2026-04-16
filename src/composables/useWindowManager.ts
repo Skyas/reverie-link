@@ -58,6 +58,7 @@ export function useWindowManager(deps: WindowManagerDeps) {
         if (hideTimer) clearTimeout(hideTimer);
         bubbleText.value = "";
         showBubble.value = true;
+        console.debug("[WindowManager] showBubbleWithText: len=%s", text.length);
         let i = 0;
         function typeNext() {
             if (i < text.length) {
@@ -73,6 +74,7 @@ export function useWindowManager(deps: WindowManagerDeps) {
     // ── 输入框 ────────────────────────────────────────────────────────
     function toggleInput() {
         inputOpen.value = !inputOpen.value;
+        console.debug("[WindowManager] toggleInput: %s", inputOpen.value);
         if (inputOpen.value) nextTick(() => inputRef.value?.focus());
     }
 
@@ -92,8 +94,10 @@ export function useWindowManager(deps: WindowManagerDeps) {
 
     // ── 锁定 / 解锁 ──────────────────────────────────────────────────
     async function toggleLock() {
+        console.debug("[WindowManager] toggleLock: 切换锁定状态");
         const newState = await invoke<boolean>("toggle_lock");
         isLocked.value = newState;
+        console.info("[WindowManager] toggleLock: 锁定=%s", newState);
         if (newState) {
             showControls.value = false;
             inputOpen.value = false;
@@ -101,6 +105,7 @@ export function useWindowManager(deps: WindowManagerDeps) {
     }
 
     async function unlockFromButton() {
+        console.debug("[WindowManager] unlockFromButton");
         const newState = await invoke<boolean>("toggle_lock");
         isLocked.value = newState;
         showUnlock.value = false;
@@ -108,7 +113,11 @@ export function useWindowManager(deps: WindowManagerDeps) {
 
     // ── 拖拽 ─────────────────────────────────────────────────────────
     async function startDrag() {
-        if (isLocked.value) return;
+        if (isLocked.value) {
+            console.debug("[WindowManager] startDrag: 已锁定，忽略");
+            return;
+        }
+        console.debug("[WindowManager] startDrag: 开始拖拽");
         await getCurrentWindow().startDragging();
     }
 

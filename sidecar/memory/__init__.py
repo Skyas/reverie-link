@@ -9,6 +9,10 @@ Reverie Link · 记忆系统
 本文件导出所有公共 API，供 main.py 和 prompt_builder.py 使用。
 """
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 # ── 数据模型 ──────────────────────────────────────────────────────
 from .models import (
     MessageType,
@@ -83,7 +87,7 @@ def init_memory_system() -> None:
     """
     init_chat_db()
     init_notebook_db()
-    print("[Memory] 记忆系统初始化完成")
+    logger.info("[Memory] 记忆系统初始化完成")
 
 
 def shutdown_memory_system() -> None:
@@ -94,4 +98,4 @@ def shutdown_memory_system() -> None:
     close_chat_db()
     close_notebook_db()
     close_vector_db()
-    print("[Memory] 记忆系统已关闭")
+    logger.info("[Memory] 记忆系统已关闭")

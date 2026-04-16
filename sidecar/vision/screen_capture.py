@@ -10,6 +10,9 @@ import ctypes
 import ctypes.wintypes
 from io import BytesIO
 from typing import Optional
+import logging
+logger = logging.getLogger(__name__)
+
 
 
 # ── 截屏 ────────────────────────────────────────────────────────
@@ -23,7 +26,7 @@ def capture_screen() -> Optional[bytes]:
         img.save(buf, format='PNG')
         return buf.getvalue()
     except Exception as e:
-        print(f"[Vision] 截屏失败: {e}")
+        logger.error("[Vision] 截屏失败: %s", e)
         return None
 
 

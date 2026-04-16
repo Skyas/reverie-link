@@ -23,6 +23,7 @@
 
     // ── 发送配置到后端（唯一的全局通信函数）─────────────────────
     async function sendConfigToBackend(llmCfg: object, charCfg: object, extraPayload?: object) {
+        console.debug("[SettingsApp] sendConfigToBackend: activePresetId=%s extra=%s", activePresetId.value, Object.keys(extraPayload ?? {}));
         try {
             const { emit } = await import("@tauri-apps/api/event");
             await emit("config-changed", {
@@ -32,8 +33,9 @@
                 memory_window: parseInt(localStorage.getItem("rl-memory-window") ?? "1", 10),
                 ...extraPayload,
             });
+            console.info("[SettingsApp] config-changed 已发送");
         } catch (e) {
-            console.warn("[config] emit failed:", e);
+            console.error("[SettingsApp] config-changed 发送失败:", e);
         }
     }
 
@@ -41,12 +43,15 @@
 
     // LLMTab 保存 LLM 配置
     function onLLMSaved(llmCfg: object) {
+        const llm = (llmCfg as any);
+        console.info("[SettingsApp] onLLMSaved: vendor=%s model=%s", llm.vendor, llm.model);
         const charCfg = JSON.parse(localStorage.getItem("rl-character") || "{}");
         sendConfigToBackend(llmCfg, charCfg);
     }
 
     // CharacterTab 激活预设
     function onActivated(presetId: string, charCfg: object) {
+        console.info("[SettingsApp] onActivated: presetId=%s char=%s", presetId, (charCfg as any).name);
         activePresetId.value = presetId;
         const llmCfg = JSON.parse(localStorage.getItem("rl-llm") || "{}");
         sendConfigToBackend(llmCfg, charCfg);
@@ -54,11 +59,14 @@
 
     // CharacterTab 删除预设（可能导致 activePresetId 变化）
     function onDeleted(newActiveId: string) {
+        console.debug("[SettingsApp] onDeleted: newActiveId=%s", newActiveId);
         activePresetId.value = newActiveId;
     }
 
     // GlobalTab 保存视觉感知
     function onVisionSaved(visionCfg: object) {
+        const vision = (visionCfg as any);
+        console.info("[SettingsApp] onVisionSaved: enabled=%s model=%s", vision.enabled, vision.vlm_model);
         const llmCfg = JSON.parse(localStorage.getItem("rl-llm") || "{}");
         const charCfg = JSON.parse(localStorage.getItem("rl-character") || "{}");
         sendConfigToBackend(llmCfg, charCfg, { vision: visionCfg });
@@ -66,6 +74,7 @@
 
     // GlobalTab 切换记忆窗口
     function onMemoryWindowChanged(index: number) {
+        console.info("[SettingsApp] onMemoryWindowChanged: index=%s", index);
         const llmCfg = JSON.parse(localStorage.getItem("rl-llm") || "{}");
         const charCfg = JSON.parse(localStorage.getItem("rl-character") || "{}");
         sendConfigToBackend(llmCfg, charCfg);
@@ -73,6 +82,7 @@
 
     // [FIX] GlobalTab 切换窗口尺寸 → 通过 config-changed 通知主窗口实时 resize
     function onSizePresetChanged(preset: string) {
+        console.info("[SettingsApp] onSizePresetChanged: preset=%s", preset);
         const llmCfg = JSON.parse(localStorage.getItem("rl-llm") || "{}");
         const charCfg = JSON.parse(localStorage.getItem("rl-character") || "{}");
         sendConfigToBackend(llmCfg, charCfg, { size_preset: preset });
@@ -80,6 +90,7 @@
 
     // ── 初始化 ────────────────────────────────────────────────────
     onMounted(async () => {
+        console.info("[SettingsApp] onMounted: 开始");
         // 加载默认头像
         try {
             const resp = await fetch("/avatar.png");
@@ -87,11 +98,17 @@
             const reader = new FileReader();
             reader.onload = () => { defaultAvatar.value = reader.result as string; };
             reader.readAsDataURL(blob);
-        } catch { /* ignore */ }
+        } catch (e) {
+            console.warn("[SettingsApp] 加载头像失败:", e);
+        }
 
         // 恢复 activePresetId
         const savedId = localStorage.getItem("rl-active-preset-id");
-        if (savedId) activePresetId.value = savedId;
+        if (savedId) {
+            activePresetId.value = savedId;
+            console.debug("[SettingsApp] activePresetId 恢复: %s", savedId);
+        }
+        console.info("[SettingsApp] onMounted: 完成");
     });
 </script>
 

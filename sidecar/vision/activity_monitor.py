@@ -15,6 +15,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional, Callable
+import logging
+logger = logging.getLogger(__name__)
 
 
 # ── 用户活动状态 ─────────────────────────────────────────────────
@@ -153,8 +155,7 @@ class ActivityMonitor:
             ms_listener.start()
             self._listeners = [kb_listener, ms_listener]
         except ImportError:
-            print("[ActivityMonitor] pynput 未安装，键鼠监听不可用。"
-                  "请 pip install pynput")
+            logger.warning("[ActivityMonitor] pynput 未安装，键鼠监听不可用. 请 pip install pynput")
             self._running = False
             return
 
@@ -163,7 +164,7 @@ class ActivityMonitor:
             target=self._sampler_loop, daemon=True
         )
         self._sampler_thread.start()
-        print("[ActivityMonitor] 已启动")
+        logger.info("[ActivityMonitor] 已启动")
 
     def stop(self):
         """停止监听"""
@@ -171,7 +172,7 @@ class ActivityMonitor:
         for listener in self._listeners:
             listener.stop()
         self._listeners = []
-        print("[ActivityMonitor] 已停止")
+        logger.info("[ActivityMonitor] 已停止")
 
     # ── pynput 回调（在监听线程中执行）──────────────────────────
 
