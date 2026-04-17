@@ -27,6 +27,7 @@ dist-ssr
 venv/
 sidecar/tmp_audio/
 sidecar/__pycache__/
+sidecar/data/
 *.pyc
 
 # 构建产物
