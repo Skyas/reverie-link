@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from "vue";
-import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 // ── 厂商预设 ──────────────────────────────────────────────────
 const VENDORS = [
@@ -88,71 +88,8 @@ async function saveLLM() {
     showMsg("✓ LLM 配置已保存");
 }
 
-// ── 语音配置 ───────────────────────────────────────────────────
-const TTS_CONFIG_KEY = "rl-tts";
-
-interface RVCVoice { name: string; pth: string; index: string; index_missing: boolean; }
-
-const tts = reactive({
-    engine:         "elevenlabs" as "elevenlabs" | "rvc",
-    enabled:        false,
-    el_api_key:     "",
-    el_voice_id:    "",
-    rvc_pth:        "",
-    rvc_index:      "",
-    rvc_edge_voice: "zh-CN-XiaoxiaoNeural",
-});
-
-const rvcVoices  = ref<RVCVoice[]>([]);
-const rvcLoading = ref(false);
-
-async function fetchRVCVoices() {
-    rvcLoading.value = true;
-    try {
-        const res = await fetch("http://localhost:18000/api/rvc/voices");
-        const data = await res.json();
-        rvcVoices.value = data.voices ?? [];
-    } catch {
-        rvcVoices.value = [];
-        showMsg("无法扫描音色，请确认后端已启动", "warn");
-    } finally {
-        rvcLoading.value = false;
-    }
-}
-
-function selectRVCVoice(voice: RVCVoice) {
-    tts.rvc_pth   = voice.pth;
-    tts.rvc_index = voice.index;
-}
-
-function saveTTS() {
-    localStorage.setItem(TTS_CONFIG_KEY, JSON.stringify({
-        engine:         tts.engine,
-        enabled:        tts.enabled,
-        el_api_key:     tts.el_api_key.trim(),
-        el_voice_id:    tts.el_voice_id.trim(),
-        rvc_pth:        tts.rvc_pth.trim(),
-        rvc_index:      tts.rvc_index.trim(),
-        rvc_edge_voice: tts.rvc_edge_voice.trim(),
-    }));
-    showMsg("✓ 语音配置已保存");
-}
-
-async function openRVCFolder() {
-    try {
-        const res = await fetch("http://localhost:18000/api/folder-paths");
-        const { rvc } = await res.json();
-        
-        // 直接调用，无需重新动态 import
-        await revealItemInDir(rvc);
-        console.log("[LLMTab] 打开 RVC 文件夹:", rvc);
-    } catch (e) {
-        console.error("[openFolder] 完整错误:", e);
-        showMsg("无法打开文件夹", "warn");
-    }
-}
-
 // ── 初始化 ─────────────────────────────────────────────────────
+// 【2026-04-15】语音合成模块已迁移至独立的 TTSTab.vue，不再在此处配置
 onMounted(() => {
     const savedKeys = localStorage.getItem("rl-api-keys");
     if (savedKeys) Object.assign(apiKeys, JSON.parse(savedKeys));
@@ -170,18 +107,6 @@ onMounted(() => {
         llm.editable = preset?.editable ?? true;
         llm.needKey  = preset?.needKey  ?? true;
         if (d.api_key) apiKeys[llm.vendor] = d.api_key;
-    }
-
-    const savedTTS = localStorage.getItem(TTS_CONFIG_KEY);
-    if (savedTTS) {
-        const d = JSON.parse(savedTTS);
-        tts.engine         = d.engine         ?? "elevenlabs";
-        tts.enabled        = d.enabled        ?? false;
-        tts.el_api_key     = d.el_api_key     ?? d.api_key   ?? "";
-        tts.el_voice_id    = d.el_voice_id    ?? d.voice_id  ?? "";
-        tts.rvc_pth        = d.rvc_pth        ?? "";
-        tts.rvc_index      = d.rvc_index      ?? "";
-        tts.rvc_edge_voice = d.rvc_edge_voice ?? "zh-CN-XiaoxiaoNeural";
     }
 });
 </script>
@@ -258,105 +183,6 @@ onMounted(() => {
         <div class="action-row">
             <button class="save-btn" @click="saveLLM">保存配置</button>
         </div>
-
-        <!-- 语音合成 -->
-        <div class="divider"></div>
-        <div class="global-section-title" style="margin-bottom:8px;">🔊 语音合成</div>
-
-        <div class="field-group">
-            <div class="toggle-row" style="margin-bottom:8px;">
-                <span class="field-label">启用语音合成</span>
-                <label class="toggle-switch">
-                    <input type="checkbox" v-model="tts.enabled" />
-                    <span class="toggle-slider"></span>
-                </label>
-            </div>
-            <div class="engine-selector">
-                <div class="engine-card" :class="{ active: tts.engine === 'elevenlabs' }"
-                     @click="tts.engine = 'elevenlabs'">
-                    <div class="engine-name">☁️ ElevenLabs</div>
-                    <div class="engine-desc">云端高质量，每月 1 万字符免费</div>
-                </div>
-                <div class="engine-card" :class="{ active: tts.engine === 'rvc' }"
-                     @click="tts.engine = 'rvc'; fetchRVCVoices()">
-                    <div class="engine-name">🖥️ 本地 RVC</div>
-                    <div class="engine-desc">完全免费，使用自训练音色</div>
-                </div>
-            </div>
-        </div>
-
-        <!-- ElevenLabs 配置 -->
-        <div v-if="tts.engine === 'elevenlabs'" class="engine-config-section">
-            <div class="field-group">
-                <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-                    <span class="field-label">ElevenLabs 配置</span>
-                    <a class="vendor-link" href="#" @click.prevent="openUrl('https://elevenlabs.io')">🔗 前往官网</a>
-                </div>
-            </div>
-            <div class="field-group">
-                <label class="field-label">API Key</label>
-                <input class="field-input" v-model="tts.el_api_key" type="password"
-                       placeholder="sk_xxxxxxxxxxxxxxxxxxxxxxxx" />
-                <p class="field-hint">密钥仅保存在本地，不会上传到任何服务器。</p>
-            </div>
-            <div class="field-group">
-                <label class="field-label">Voice ID</label>
-                <input class="field-input" v-model="tts.el_voice_id"
-                       placeholder="在 ElevenLabs → Voices 里找到对应 ID" />
-                <p class="field-hint">每个音色都有唯一 ID，如 <code>21m00Tcm4TlvDq8ikWAM</code></p>
-            </div>
-        </div>
-
-        <!-- 本地 RVC 配置 -->
-        <div v-if="tts.engine === 'rvc'" class="engine-config-section">
-            <div class="field-group">
-                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
-                    <span class="field-label">RVC 音色</span>
-                    <span class="field-note">将 .pth 和 .index 放入 public/rvc/</span>
-                </div>
-                <div v-if="rvcLoading" class="models-loading">扫描中…</div>
-                <div v-else-if="rvcVoices.length === 0" class="models-empty">
-                    <p class="field-note">未找到音色文件</p>
-                    <div style="display:flex; gap:8px;">
-                        <button class="refresh-btn" @click="fetchRVCVoices">重新扫描</button>
-                        <button class="refresh-btn" @click="openRVCFolder">📂 打开文件夹</button>
-                    </div>
-                </div>
-                <div v-else class="rvc-voices-list">
-                    <p class="field-hint" style="margin-bottom:4px;">
-                        命名规范：<code>.pth</code> 与 <code>.index</code> 必须同名，例如 <code>Hibiki.pth</code> + <code>Hibiki.index</code>
-                    </p>
-                    <div v-for="v in rvcVoices" :key="v.pth"
-                         class="rvc-voice-card"
-                         :class="{ active: tts.rvc_pth === v.pth, 'index-warn': v.index_missing }"
-                         @click="selectRVCVoice(v)">
-                        <div class="rvc-voice-name">🎤 {{ v.name }}</div>
-                        <div class="rvc-voice-meta">
-                            <span v-if="v.index_missing" class="rvc-warn">⚠️ 缺少同名 .index 文件</span>
-                            <span v-else>✓ Index 文件匹配</span>
-                        </div>
-                    </div>
-                    <div style="display:flex; gap:8px;">
-                        <button class="refresh-btn" @click="fetchRVCVoices">🔄 重新扫描</button>
-                        <button class="refresh-btn" @click="openRVCFolder">📂 打开文件夹</button>
-                    </div>
-                </div>
-            </div>
-            <div class="field-group">
-                <label class="field-label">底层 TTS 语音 <span class="field-note">Edge-TTS 原声</span></label>
-                <select class="field-select" v-model="tts.rvc_edge_voice">
-                    <option value="zh-CN-XiaoxiaoNeural">晓晓（温柔女声）</option>
-                    <option value="zh-CN-XiaohanNeural">晓涵（活泼少女）</option>
-                    <option value="zh-CN-XiaoyiNeural">晓伊（可爱元气）</option>
-                    <option value="zh-CN-YunxiNeural">云希（男声）</option>
-                </select>
-                <p class="field-hint">底层原声音调会影响变声效果，建议选择与模型训练音色性别一致的声音。</p>
-            </div>
-        </div>
-
-        <div class="action-row">
-            <button class="save-btn" @click="saveTTS">保存语音配置</button>
-        </div>
     </div>
 </template>
 
@@ -370,49 +196,6 @@ onMounted(() => {
     transition: color 0.2s;
 }
 .vendor-link:hover { text-decoration: underline; }
-
-.engine-selector { display: flex; gap: 8px; }
-.engine-card {
-    flex: 1; padding: 10px;
-    border: 1.5px solid var(--c-border); border-radius: 12px;
-    cursor: pointer; background: var(--c-surface);
-    transition: border-color 0.2s, box-shadow 0.2s;
-}
-.engine-card:hover { border-color: var(--c-pink-mid); }
-.engine-card.active {
-    border-color: var(--c-blue);
-    box-shadow: 0 0 0 3px var(--c-blue-light);
-    background: linear-gradient(135deg, rgba(197,232,244,0.15), rgba(255,183,197,0.1));
-}
-.engine-name { font-size: 13px; font-weight: 600; color: var(--c-text); }
-.engine-desc { font-size: 11px; color: var(--c-text-soft); margin-top: 2px; }
-
-.engine-config-section {
-    display: flex; flex-direction: column; gap: 10px;
-    padding: 10px 12px;
-    background: var(--c-surface);
-    border: 1.5px solid var(--c-border); border-radius: 12px;
-}
-
-.models-loading { color: var(--c-text-soft); font-size: 13px; padding: 8px 0; }
-.models-empty { display: flex; flex-direction: column; gap: 6px; padding: 8px 0; }
-.models-empty p { font-size: 13px; color: var(--c-text-soft); }
-
-.rvc-voices-list { display: flex; flex-direction: column; gap: 6px; }
-.rvc-voice-card {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 8px 12px;
-    border: 1.5px solid var(--c-border); border-radius: 10px;
-    cursor: pointer; background: var(--c-surface);
-    transition: border-color 0.2s, box-shadow 0.2s;
-}
-.rvc-voice-card:hover { border-color: var(--c-pink-mid); }
-.rvc-voice-card.active { border-color: var(--c-blue); box-shadow: 0 0 0 3px var(--c-blue-light); }
-.rvc-voice-card.index-warn { border-color: #F0C060; }
-.rvc-voice-card.index-warn.active { border-color: #E0A000; box-shadow: 0 0 0 3px rgba(240,192,0,0.2); }
-.rvc-voice-name { font-size: 13px; font-weight: 600; color: var(--c-text); }
-.rvc-voice-meta { font-size: 11px; color: var(--c-text-soft); }
-.rvc-warn { color: #C08000; font-weight: 500; }
 
 /* toast（复用全局样式） */
 .toast {

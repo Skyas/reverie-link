@@ -4,6 +4,7 @@ uvicorn[standard]
 openai
 python-dotenv
 httpx
+websocket
 
 # ── Phase 3: 记忆系统 ─────────────────────────────────────────
 chromadb

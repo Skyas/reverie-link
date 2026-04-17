@@ -3,10 +3,11 @@
     import LLMTab from "./components/settings/LLMTab.vue";
     import CharacterTab from "./components/settings/CharacterTab.vue";
     import GlobalTab from "./components/settings/GlobalTab.vue";
+    import TTSTab from "./components/settings/TTSTab.vue";
     import NotebookModal from "./components/settings/NotebookModal.vue";
 
     // ── 全局状态（需跨组件共享的最小集合）────────────────────────
-    const activeTab = ref<"llm" | "character" | "global">("llm");
+    const activeTab = ref<"llm" | "character" | "global" | "tts">("llm");
     const activePresetId = ref<string>("");
     const defaultAvatar = ref<string>("");
 
@@ -64,6 +65,14 @@
         sendConfigToBackend(llmCfg, charCfg, { vision: visionCfg });
     }
 
+    // TTSTab 保存语音配置 → 通过 config-changed 发送给主窗口 WebSocket
+    function onTTSSaved(ttsCfg: object) {
+        const llmCfg  = JSON.parse(localStorage.getItem("rl-llm")  || "{}");
+        const charCfg = JSON.parse(localStorage.getItem("rl-character") || "{}");
+        sendConfigToBackend(llmCfg, charCfg, { tts: ttsCfg });
+        console.log("[Settings] TTS 配置已通过 config-changed 推送", ttsCfg);
+    }
+
     // GlobalTab 切换记忆窗口
     function onMemoryWindowChanged(index: number) {
         const llmCfg = JSON.parse(localStorage.getItem("rl-llm") || "{}");
@@ -115,6 +124,10 @@
                     @click="activeTab = 'character'">
                 <span class="tab-icon">🌸</span> 角色设定
             </button>
+            <button class="tab-btn" :class="{ active: activeTab === 'tts' }"
+                    @click="activeTab = 'tts'">
+                <span class="tab-icon">🔊</span> 语音配置
+            </button>
             <button class="tab-btn" :class="{ active: activeTab === 'global' }"
                     @click="activeTab = 'global'">
                 <span class="tab-icon">⚙️</span> 全局设置
@@ -131,6 +144,8 @@
                           @activated="onActivated"
                           @deleted="onDeleted"
                           @open-notebook="onOpenNotebook" />
+            <TTSTab v-if="activeTab === 'tts'"
+                    @tts-saved="onTTSSaved" />
             <GlobalTab v-if="activeTab === 'global'"
                        @vision-saved="onVisionSaved"
                        @memory-window-changed="onMemoryWindowChanged"

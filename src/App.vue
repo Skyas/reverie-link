@@ -23,7 +23,7 @@ const {
 } = useLive2D(canvasRef, BASE_W, BASE_H);
 
 // ── 3. TTS ─────────────────────────────────────────────────────────────
-const { speakText, stopTTS, destroyTTS } = useTTS({ setMouthOpen });
+const { speakText, stopTTS, destroyTTS, syncConfigToBackend } = useTTS({ setMouthOpen });
 
 // ── 4. 静音状态（由托盘菜单控制，前端音频层生效）────────────────────────
 const isMuted = ref(false);
@@ -37,12 +37,12 @@ const {
     onChatResponse: (cleanText, emotion) => {
         if (emotion) setEmotion(emotion);
         showBubbleWithText(cleanText);
-        if (!isMuted.value) speakText(cleanText);
+        if (!isMuted.value) speakText(cleanText, emotion || "neutral");
     },
     onVisionSpeech: (cleanText, emotion) => {
         if (emotion) setEmotion(emotion);
         showBubbleWithText(cleanText);
-        if (!isMuted.value) speakText(cleanText);
+        if (!isMuted.value) speakText(cleanText, emotion || "neutral");
     },
     onError: (message) => {
         showBubbleWithText("呜…出错了：" + message);
@@ -159,6 +159,9 @@ const onStorageChange = (e: StorageEvent) => {
 onMounted(async () => {
     console.time("[⏱ onMounted 总耗时]");
     connectWS();
+
+    // TTS：将 localStorage 中保存的配置同步给后端（后端重启时恢复状态）
+    syncConfigToBackend().catch(e => console.warn("[TTS] 启动同步失败:", e));
 
     // 并行：窗口位置初始化 + Live2D 初始化
     await Promise.all([

@@ -1,40 +1,129 @@
 """
-Reverie Link · TTS 路由
+Reverie Link · TTS 路由层（全流式重构版）
 
-包含三个语音合成相关接口：
-  - POST /api/tts         ElevenLabs 云端 TTS
-  - GET  /api/rvc/voices  本地 RVC 音色扫描
-  - POST /api/tts/local   本地 Edge-TTS + RVC 变声
+接口列表：
+  POST /tts/config          更新 TTS 引擎配置（Settings 保存时调用）
+  GET  /tts/status          查询当前引擎状态
+  GET  /tts/voices          获取当前引擎音色列表
+  POST /tts/synthesize      流式合成语音（对话流程调用，返回音频流）
+  POST /tts/test            测试当前引擎连通性
+
+旧接口保留兼容：
+  POST /api/tts             → 旧 ElevenLabs 路由（向后兼容，确认前端不调用后可删除）
 """
 
-import asyncio
 import json
-import uuid
+import logging
 from pathlib import Path
 
 import httpx
-from fastapi import APIRouter
-from fastapi.responses import Response
+from fastapi import APIRouter, Request
+from fastapi.responses import Response, StreamingResponse
 
-# ── 路径常量（本文件位于 sidecar/routers/tts.py）─────────────────
-RVC_DIR = Path(__file__).parent.parent.parent / "public" / "rvc"
-TMP_DIR = Path(__file__).parent.parent / "tmp_audio"
-TMP_DIR.mkdir(exist_ok=True)
+from tts import tts_manager
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# ════════════════════════════════════════════════════════════════
+#  新接口 — TTSManager 统一路由
+# ════════════════════════════════════════════════════════════════
 
-# ── ElevenLabs TTS ─────────────────────────────────────────────
+@router.post("/tts/config")
+async def tts_config(body: dict):
+    """
+    更新 TTS 引擎配置。前端 Settings 保存时调用。
+    """
+    logger.info(
+        f"[TTS Route] 收到配置更新 | mode={body.get('mode')} "
+        f"provider={body.get('provider')} voice_id={body.get('voice_id')}"
+    )
+    tts_manager.configure(body)
+    return {"status": "ok", **tts_manager.get_status()}
+
+
+@router.get("/tts/status")
+async def tts_status():
+    """查询当前 TTS 引擎状态，供前端状态栏展示。"""
+    status = tts_manager.get_status()
+    logger.debug(f"[TTS Route] 状态查询 | {status}")
+    return status
+
+
+@router.get("/tts/voices")
+async def tts_voices():
+    """获取当前引擎的可用音色列表。"""
+    voices = await tts_manager.list_voices()
+    logger.debug(f"[TTS Route] 音色列表 | count={len(voices)}")
+    return {
+        "voices": [
+            {
+                "id":          v.id,
+                "name":        v.name,
+                "engine":      v.engine,
+                "preview_url": v.preview_url,
+                "tags":        v.tags,
+            }
+            for v in voices
+        ]
+    }
+
+
+@router.post("/tts/synthesize")
+async def tts_synthesize(body: dict):
+    """
+    流式合成语音。对话流程通过此接口触发。
+    返回：分块传输的音频流 (Transfer-Encoding: chunked)
+    """
+    text     = body.get("text", "").strip()
+    emotion  = body.get("emotion", "neutral")
+    voice_id = body.get("voice_id", "")
+
+    if not text:
+        return Response(
+            content=json.dumps({"error": "text 不能为空"}, ensure_ascii=False),
+            status_code=400, media_type="application/json",
+        )
+
+    # 检查是否处于无语音模式，如果是，直接返回 204
+    if not tts_manager.is_enabled:
+        logger.debug("[TTS Route] 无语音模式或引擎未就绪，返回 204")
+        return Response(status_code=204)
+
+    logger.debug(
+        f"[TTS Route] 流式合成请求 | emotion={emotion} "
+        f"voice_id={voice_id or '(default)'} text_len={len(text)}"
+    )
+
+    audio_generator = tts_manager.synthesize(text, emotion=emotion, voice_id=voice_id)
+
+    return StreamingResponse(
+        audio_generator,
+        media_type="application/octet-stream"
+    )
+
+
+@router.post("/tts/test")
+async def tts_test():
+    """测试当前引擎连通性。"""
+    logger.info("[TTS Route] 连通性测试请求")
+    result = await tts_manager.test_connection()
+    return result
+
+
+# ════════════════════════════════════════════════════════════════
+#  旧接口兼容层（Deprecated）
+# ════════════════════════════════════════════════════════════════
 
 @router.post("/api/tts")
-async def tts(body: dict):
-    """
-    调用 ElevenLabs TTS API，返回 MP3 音频流。
-    请求体：{ text, api_key, voice_id }
-    """
+async def tts_legacy(body: dict):
+    """[Deprecated] 旧 ElevenLabs TTS 接口。"""
     text     = body.get("text", "").strip()
     api_key  = body.get("api_key", "").strip()
     voice_id = body.get("voice_id", "").strip()
+
+    logger.warning("[TTS Route] 旧接口 /api/tts 被调用（Deprecated）")
 
     if not text or not api_key or not voice_id:
         return Response(
@@ -52,10 +141,8 @@ async def tts(body: dict):
         "text": text,
         "model_id": "eleven_flash_v2_5",
         "voice_settings": {
-            "stability":         0.45,
-            "similarity_boost":  0.80,
-            "style":             0.35,
-            "use_speaker_boost": True,
+            "stability": 0.45, "similarity_boost": 0.80,
+            "style": 0.35, "use_speaker_boost": True,
         },
     }
 
@@ -64,7 +151,9 @@ async def tts(body: dict):
             resp = await client.post(url, headers=headers, json=payload)
         if resp.status_code != 200:
             return Response(
-                content=json.dumps({"error": f"ElevenLabs 错误: {resp.status_code}"}, ensure_ascii=False),
+                content=json.dumps(
+                    {"error": f"ElevenLabs 错误: {resp.status_code}"}, ensure_ascii=False
+                ),
                 status_code=502, media_type="application/json",
             )
         return Response(content=resp.content, media_type="audio/mpeg")
@@ -78,109 +167,3 @@ async def tts(body: dict):
             content=json.dumps({"error": str(e)}, ensure_ascii=False),
             status_code=500, media_type="application/json",
         )
-
-
-# ── RVC 音色扫描 ────────────────────────────────────────────────
-
-@router.get("/api/rvc/voices")
-async def list_rvc_voices():
-    """
-    扫描 public/rvc/ 目录，返回所有可用音色。
-    .pth 和 .index 文件必须同名（扩展名不同）。
-    """
-    if not RVC_DIR.exists():
-        return {"voices": []}
-
-    voices = []
-    for pth_file in sorted(RVC_DIR.glob("*.pth")):
-        name         = pth_file.stem
-        index_file   = RVC_DIR / f"{name}.index"
-        voices.append({
-            "name":          name,
-            "pth":           f"rvc/{pth_file.name}",
-            "index":         f"rvc/{index_file.name}" if index_file.exists() else "",
-            "index_missing": not index_file.exists(),
-        })
-
-    return {"voices": voices}
-
-
-# ── 本地 RVC TTS ────────────────────────────────────────────────
-
-@router.post("/api/tts/local")
-async def tts_local(body: dict):
-    """
-    本地语音合成：Edge-TTS 生成原声 → RVC v2 变声 → 返回 WAV。
-    请求体：{ text, pth, index, edge_voice }
-    """
-    text       = body.get("text", "").strip()
-    pth        = body.get("pth", "").strip()
-    index      = body.get("index", "").strip()
-    edge_voice = body.get("edge_voice", "zh-CN-XiaoxiaoNeural").strip()
-
-    if not text or not pth:
-        return Response(
-            content=json.dumps({"error": "缺少 text 或 pth"}, ensure_ascii=False),
-            status_code=400, media_type="application/json",
-        )
-
-    project_root = Path(__file__).parent.parent.parent
-    pth_path     = project_root / "public" / pth
-    index_path   = (project_root / "public" / index) if index else None
-
-    if not pth_path.exists():
-        return Response(
-            content=json.dumps({"error": f"模型文件不存在: {pth}"}, ensure_ascii=False),
-            status_code=404, media_type="application/json",
-        )
-
-    tmp_mp3 = TMP_DIR / f"edge_{uuid.uuid4().hex}.mp3"
-    tmp_wav = TMP_DIR / f"rvc_{uuid.uuid4().hex}.wav"
-
-    try:
-        import edge_tts
-        communicate = edge_tts.Communicate(text, edge_voice)
-        await communicate.save(str(tmp_mp3))
-
-        rvc_script = Path(__file__).parent.parent / "rvc_infer.py"
-        cmd = ["python", str(rvc_script), "--pth", str(pth_path), "--input", str(tmp_mp3), "--output", str(tmp_wav)]
-        if index_path and index_path.exists():
-            cmd += ["--index", str(index_path)]
-
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
-        if proc.returncode != 0:
-            print(f"[RVC] 推理失败: {stderr.decode(errors='replace')[:300]}")
-            return Response(
-                content=json.dumps({"error": "RVC 推理失败"}, ensure_ascii=False),
-                status_code=500, media_type="application/json",
-            )
-
-        return Response(content=tmp_wav.read_bytes(), media_type="audio/wav")
-
-    except asyncio.TimeoutError:
-        return Response(
-            content=json.dumps({"error": "RVC 推理超时（超过60秒）"}, ensure_ascii=False),
-            status_code=504, media_type="application/json",
-        )
-    except ImportError:
-        return Response(
-            content=json.dumps({"error": "edge-tts 未安装，请执行 pip install edge-tts"}, ensure_ascii=False),
-            status_code=501, media_type="application/json",
-        )
-    except Exception as e:
-        return Response(
-            content=json.dumps({"error": str(e)}, ensure_ascii=False),
-            status_code=500, media_type="application/json",
-        )
-    finally:
-        for f in [tmp_mp3, tmp_wav]:
-            try:
-                if f.exists():
-                    f.unlink()
-            except Exception:
-                pass
