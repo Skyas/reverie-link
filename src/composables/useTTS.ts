@@ -3,6 +3,9 @@
  *
  * 变更记录：
  *   [FIX-⑤] getBackendTTSConfig() 传递 proxy 字段
+ *   [FIX-⑥] getBackendTTSConfig() 补传 model 字段
+ *           —— 修复启动同步时 model 丢失，导致阿里云等场景 voice_id 与
+ *              后端默认 model 不匹配、合成/测试失败，必须重新点保存才能生效的问题。
  *
  * 职责：
  *   - 从 localStorage 读取 TTS 配置，在应用启动时同步给后端
@@ -33,16 +36,29 @@ function getBackendTTSConfig(): Record<string, string> | null {
         const cfg = JSON.parse(raw);
         if (!cfg.mode || cfg.mode === "disabled") return null;
 
+        const provider = cfg.provider ?? "";
+
+        // [FIX-⑥] model 读取顺序：
+        //   1) 顶层 cfg.model —— saveTTS 每次都写，代表"保存时真正生效的 model"
+        //      （自定义模型场景下，这个是 customModelTexts[provider]，
+        //       不等于 cfg.models[provider]，所以必须优先读顶层）
+        //   2) cfg.models[provider] —— 理论不会走到，兜底用
+        //   3) "" —— 极老版本数据无 model 字段时，让后端走默认 model
+        const model = cfg.model
+            ?? (cfg.models ?? {})[provider]
+            ?? "";
+
         const backendCfg: Record<string, string> = {
             mode:     cfg.mode,
-            provider: cfg.provider ?? "",
-            api_key:  (cfg.api_keys ?? {})[cfg.provider ?? ""] ?? "",
+            provider: provider,
+            api_key:  (cfg.api_keys ?? {})[provider] ?? "",
             voice_id: cfg.voice_id ?? "",
+            model:    model,
             base_url: cfg.base_url ?? "",
             // [FIX-⑤] 代理：开关开启且有地址时才传
             proxy:    (cfg.proxy_enabled && cfg.proxy_url) ? cfg.proxy_url : "",
         };
-        if (cfg.provider === "minimax") {
+        if (provider === "minimax") {
             backendCfg.group_id = (cfg.group_ids ?? {})["minimax"] ?? "";
         }
         return backendCfg;
@@ -63,6 +79,11 @@ export function useTTS({ setMouthOpen }: TTSDeps) {
             console.log("[TTS] 无 TTS 配置或已禁用，跳过同步");
             return;
         }
+        // [FIX-⑥] 日志里把 model 也打出来，便于排查"model 丢失"类问题
+        console.log(
+            `[TTS] 启动同步发起 | mode=${cfg.mode} provider=${cfg.provider} `
+            + `model="${cfg.model || '(空)'}" voice_id="${cfg.voice_id || '(空)'}"`
+        );
         try {
             const resp = await fetch(`${BACKEND_BASE}/tts/config`, {
                 method:  "POST",
@@ -72,7 +93,8 @@ export function useTTS({ setMouthOpen }: TTSDeps) {
             if (resp.ok) {
                 const data = await resp.json();
                 console.log(
-                    `[TTS] 启动同步成功 | mode=${data.mode} provider=${data.provider} ready=${data.ready}`
+                    `[TTS] 启动同步成功 | mode=${data.mode} provider=${data.provider} `
+                    + `ready=${data.ready}`
                 );
             } else {
                 console.warn("[TTS] 启动同步失败 status=", resp.status);
