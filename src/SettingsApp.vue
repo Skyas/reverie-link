@@ -2,12 +2,13 @@
     import { ref, onMounted } from "vue";
     import LLMTab from "./components/settings/LLMTab.vue";
     import CharacterTab from "./components/settings/CharacterTab.vue";
-    import GlobalTab from "./components/settings/GlobalTab.vue";
+    import Live2DTab from "./components/settings/Live2DTab.vue";
     import TTSTab from "./components/settings/TTSTab.vue";
+    import GlobalTab from "./components/settings/GlobalTab.vue";
     import NotebookModal from "./components/settings/NotebookModal.vue";
 
     // ── 全局状态（需跨组件共享的最小集合）────────────────────────
-    const activeTab = ref<"llm" | "character" | "global" | "tts">("llm");
+    const activeTab = ref<"llm" | "character" | "live2d" | "tts" | "global">("llm");
     const activePresetId = ref<string>("");
     const defaultAvatar = ref<string>("");
 
@@ -124,6 +125,10 @@
                     @click="activeTab = 'character'">
                 <span class="tab-icon">🌸</span> 角色设定
             </button>
+            <button class="tab-btn" :class="{ active: activeTab === 'live2d' }"
+                    @click="activeTab = 'live2d'">
+                <span class="tab-icon">🎭</span> Live2D
+            </button>
             <button class="tab-btn" :class="{ active: activeTab === 'tts' }"
                     @click="activeTab = 'tts'">
                 <span class="tab-icon">🔊</span> 语音配置
@@ -144,6 +149,7 @@
                           @activated="onActivated"
                           @deleted="onDeleted"
                           @open-notebook="onOpenNotebook" />
+            <Live2DTab v-if="activeTab === 'live2d'" />
             <TTSTab v-if="activeTab === 'tts'"
                     @tts-saved="onTTSSaved" />
             <GlobalTab v-if="activeTab === 'global'"
@@ -296,13 +302,11 @@
     .action-row {
         display: flex;
         align-items: center;
-        justify-content: flex-end;
-        gap: 12px;
-        padding-top: 4px;
+        gap: 10px;
+        padding-top: 8px;
     }
 
     .save-btn {
-        padding: 9px 24px;
         border: none;
         border-radius: 20px;
         background: linear-gradient(135deg, #A8D8EA, #FFB7C5);
@@ -311,16 +315,12 @@
         font-weight: 600;
         font-family: inherit;
         cursor: pointer;
-        box-shadow: 0 3px 12px rgba(180,140,200,0.12);
-        transition: opacity 0.2s, transform 0.15s;
+        padding: 8px 22px;
+        transition: opacity 0.2s;
     }
 
         .save-btn:hover {
             opacity: 0.88;
-        }
-
-        .save-btn:active {
-            transform: scale(0.97);
         }
 
     .divider {
@@ -577,12 +577,12 @@
 
     .tab-btn {
         flex: 1;
-        padding: 9px 8px;
+        padding: 9px 6px;
         border: none;
         border-radius: 10px 10px 0 0;
         background: transparent;
         cursor: pointer;
-        font-size: 12px;
+        font-size: 11px;
         font-family: inherit;
         color: var(--c-text-soft);
         font-weight: 500;
@@ -590,7 +590,8 @@
         display: flex;
         align-items: center;
         justify-content: center;
-        gap: 4px;
+        gap: 3px;
+        white-space: nowrap;
     }
 
         .tab-btn:hover {
@@ -606,7 +607,7 @@
         }
 
     .tab-icon {
-        font-size: 14px;
+        font-size: 13px;
     }
 
     .content {

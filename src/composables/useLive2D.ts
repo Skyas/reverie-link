@@ -1,5 +1,5 @@
 /**
- * useLive2D.ts — Live2D 渲染、表情与唇音口型驱动
+ * useLive2D.ts — Live2D 渲染、表情、唇音、动作调度
  *
  * 职责：
  *   - PIXI Application 初始化 / 销毁 / 模型热切换
@@ -7,6 +7,9 @@
  *   - 表情系统（expression 接口 / 参数直驱 fallback）
  *   - 嘴部开合参数驱动（由 useTTS 通过 setMouthOpen 调用）
  *   - 尺寸响应式更新（BASE_W 变化时自动 resize 渲染器 + 模型缩放）
+ *   - 【Phase 4 新增】动作调度：
+ *       · 待机随机（NORMAL 优先级，配置化间隔）
+ *       · 高优先级通道 playMotion（FORCE，自动打断 + 重置待机计时）
  *
  * 依赖注入：
  *   canvasRef  — HTMLCanvasElement 的 Ref，由 App.vue 传入
@@ -19,11 +22,19 @@
  *   WebGL 纹理创建的开销，与模型文件大小无关）。为避免阻塞窗口显示，initLive2D()
  *   在创建完 PIXI Application 后立即返回，模型在后台异步加载。Ticker 渲染受
  *   live2dReady 守卫保护，模型就绪前不渲染 live2dContainer，避免空容器闪烁。
+ *
+ * 动作调度说明（Phase 4）：
+ *   三类触发源 → 两条优先级通道
+ *     · 待机随机    → NORMAL
+ *     · 情绪 Motion  → FORCE（未来 EMOTION_TAG 模块 A 落地时通过 playMotion 接入）
+ *     · AI 指定      → FORCE（同上）
+ *   FORCE 优先级由 pixi-live2d-display 底层保证打断正在播放的 NORMAL 动作。
+ *   高优先级触发后，本模块额外重置待机计时，防止"紧跟着又触发一个待机"的违和。
  */
 
 import { ref, watch, type Ref, type ComputedRef } from "vue";
 import * as PIXI from "pixi.js";
-import { Live2DModel } from "pixi-live2d-display/cubism4";
+import { Live2DModel, MotionPriority } from "pixi-live2d-display/cubism4";
 import { type EmotionTag } from "./utils/emotion";
 
 // Ticker 只注册一次（模块级 flag）
@@ -51,6 +62,15 @@ function saveModelSettings(path: string, zoom: number, y: number) {
     } catch { /* ignore */ }
 }
 
+// ── 待机动画默认配置 ─────────────────────────────────────────────────
+// 与 Live2DTab.vue 保持一致
+export const IDLE_MOTION_DEFAULT = {
+    enabled: false,
+    minInterval: 30,  // 秒
+    maxInterval: 60,  // 秒
+};
+export type IdleMotionConfig = typeof IDLE_MOTION_DEFAULT;
+
 // ── 主体 ──────────────────────────────────────────────────────────────
 export function useLive2D(
     canvasRef: Ref<HTMLCanvasElement | null>,
@@ -69,10 +89,10 @@ export function useLive2D(
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let pixiApp: PIXI.Application | null = null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let live2dModel: any = null;
     let live2dContainer: PIXI.Container | null = null;
     let renderTexture: PIXI.RenderTexture | null = null;
-    // [FIX] 将 sprite 提升为模块变量，供 resizeLive2D 更新纹理引用
     let displaySprite: PIXI.Sprite | null = null;
 
     // 帧切换保护用
@@ -80,6 +100,10 @@ export function useLive2D(
 
     // 表情重置计时器
     let emotionResetTimer: ReturnType<typeof setTimeout> | null = null;
+
+    // ── 待机动画调度状态 ──────────────────────────────────────────────
+    let idleConfig: IdleMotionConfig = { ...IDLE_MOTION_DEFAULT };
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
 
     // ── 帧切换参数保护 ────────────────────────────────────────────────
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -271,6 +295,149 @@ export function useLive2D(
         } catch { /* ignore */ }
     }
 
+    // ── 动作调度 ──────────────────────────────────────────────────────
+
+    /**
+     * 枚举当前模型已注册的非 Idle 动作组。
+     * 返回 [{group, count}, ...]，group 可能是 ""（VTS 免费模型惯例）。
+     * 无可用动作时返回空数组。
+     */
+    function getMotionList(): { group: string; count: number }[] {
+        if (!live2dModel || !live2dReady.value) return [];
+        try {
+            const defs = live2dModel.internalModel?.motionManager?.definitions;
+            if (!defs || typeof defs !== "object") return [];
+            const result: { group: string; count: number }[] = [];
+            for (const [group, list] of Object.entries(defs)) {
+                if (group.toLowerCase() === "idle") continue;
+                if (Array.isArray(list) && list.length > 0) {
+                    result.push({ group, count: list.length });
+                }
+            }
+            return result;
+        } catch (e) {
+            console.warn("[Live2D] getMotionList 失败:", e);
+            return [];
+        }
+    }
+
+    /**
+     * 高优先级动作触发通道（对外）。
+     *
+     * 行为：
+     *   1. 用 FORCE 优先级触发指定动作 → pixi-live2d-display 底层会打断
+     *      当前正在播放的 NORMAL 动作（含待机随机刚触发的动作）。
+     *   2. 重置待机计时器 → 避免"高优先级动作才放完，紧接着又触发待机"。
+     *
+     * 调用场景（Stage 1 保留此通道，实际使用方在后续阶段接入）：
+     *   - 情绪标签绑定到 motion 时（EMOTION_TAG 模块 A）
+     *   - AI 回复中的 [motion:xx] 标签
+     */
+    function playMotion(group: string, index?: number) {
+        if (!live2dModel || !live2dReady.value) {
+            console.warn("[Live2D] playMotion 失败：模型未就绪");
+            return;
+        }
+        try {
+            // index 省略 → pixi-live2d-display 会在该组内随机挑一个
+            const promise = live2dModel.motion(group, index, MotionPriority.FORCE);
+            console.info(
+                `[Live2D] playMotion: group="${group}" index=${index ?? "random"} ` +
+                `priority=FORCE`
+            );
+            // 重置待机计时（无论动作是否成功触发，都视为"有新动作刚发生"）
+            if (idleConfig.enabled) {
+                rescheduleIdle();
+                console.info("[Live2D] 高优先级动作触发后，待机计时已重置");
+            }
+            return promise;
+        } catch (e) {
+            console.warn("[Live2D] playMotion 异常:", e);
+        }
+    }
+
+    /**
+     * 待机随机触发（内部）。用 NORMAL 优先级，可被 FORCE 打断。
+     */
+    function fireIdleRandom() {
+        if (!live2dModel || !live2dReady.value) return;
+        const list = getMotionList();
+        if (list.length === 0) {
+            // 模型无非 Idle 动作（如 MO），静默跳过。不打 warn，避免日志刷屏。
+            return;
+        }
+        // 先按组数均匀挑组，再组内均匀挑索引
+        const group = list[Math.floor(Math.random() * list.length)];
+        const index = Math.floor(Math.random() * group.count);
+        try {
+            live2dModel.motion(group.group, index, MotionPriority.NORMAL);
+            console.info(
+                `[Live2D] 待机动画触发: group="${group.group}" index=${index}/${group.count}`
+            );
+        } catch (e) {
+            console.warn("[Live2D] 待机动画触发异常:", e);
+        }
+    }
+
+    /**
+     * 计算下一次待机触发的延迟并注册 timer。
+     * 内部调用，前置条件：enabled = true 且 live2dReady = true
+     */
+    function scheduleNextIdle() {
+        if (!idleConfig.enabled || !live2dReady.value) return;
+        const min = Math.max(1, idleConfig.minInterval);
+        const max = Math.max(min, idleConfig.maxInterval);
+        const delay = (min + Math.random() * (max - min)) * 1000;
+        idleTimer = setTimeout(() => {
+            idleTimer = null;
+            fireIdleRandom();
+            scheduleNextIdle();  // 链式调度
+        }, delay);
+    }
+
+    /**
+     * 清除待机计时器（不改变 enabled 状态）。
+     */
+    function stopIdleTimer() {
+        if (idleTimer !== null) {
+            clearTimeout(idleTimer);
+            idleTimer = null;
+        }
+    }
+
+    /**
+     * 重置待机计时器：停止当前 + 立刻按 enabled 条件重新调度。
+     * 供 playMotion 调用、也供配置变更时调用。
+     */
+    function rescheduleIdle() {
+        stopIdleTimer();
+        scheduleNextIdle();
+    }
+
+    /**
+     * 配置待机动画（对外）。
+     * 由 App.vue 在启动时读 localStorage 调用一次，
+     * 用户在 Live2DTab.vue 改配置后通过 Tauri 事件触发再次调用。
+     */
+    function configureIdleMotion(cfg: Partial<IdleMotionConfig>) {
+        idleConfig = { ...idleConfig, ...cfg };
+        // 规范化
+        if (idleConfig.minInterval < 1) idleConfig.minInterval = 1;
+        if (idleConfig.maxInterval < idleConfig.minInterval) {
+            idleConfig.maxInterval = idleConfig.minInterval;
+        }
+        console.info(
+            `[Live2D] 待机动画配置: enabled=${idleConfig.enabled} ` +
+            `interval=${idleConfig.minInterval}~${idleConfig.maxInterval}s`
+        );
+
+        if (!idleConfig.enabled) {
+            stopIdleTimer();
+        } else {
+            rescheduleIdle();
+        }
+    }
+
     // ── 内部辅助：将模型挂载到容器并应用位置 ─────────────────────────
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     function mountModel(model: any, path: string, w: number) {
@@ -282,11 +449,18 @@ export function useLive2D(
         model.y = y;
         live2dContainer!.addChild(model);
 
-        try {
-            const core = model.internalModel.coreModel;
-            core.setPartOpacityById("PartArmA", 1);
-            core.setPartOpacityById("PartArmB", 0);
-        } catch { /* ignore */ }
+        // hiyori 模型特有：PartArmA/PartArmB 多状态手臂归位
+        // VTS 免费模型的遗留问题，默认加载时会同时显示两套手臂。
+        // 仅对 hiyori 系列模型生效（如 hiyori / hiyori_vts 等变体文件夹名），
+        // 避免对其他模型无差别操作（如 MO 不存在这两个 Part）。
+        if (path.toLowerCase().includes("hiyori")) {
+            try {
+                const core = model.internalModel.coreModel;
+                core.setPartOpacityById("PartArmA", 1);
+                core.setPartOpacityById("PartArmB", 0);
+                console.info("[Live2D] hiyori 专属：已归位 PartArmA=1, PartArmB=0");
+            } catch { /* ignore */ }
+        }
     }
 
     // ── 内部辅助：后台加载模型 ───────────────────────────────────────
@@ -308,6 +482,11 @@ export function useLive2D(
             await setupFrameSwitchProtection(live2dModel, modelPath);
             // 一切就绪后才设为 true，Ticker 才开始渲染模型
             live2dReady.value = true;
+            // 模型就绪 → 按当前配置启动待机调度（若 enabled）
+            if (idleConfig.enabled) {
+                rescheduleIdle();
+                console.info("[Live2D] 模型加载完成，待机动画已启动");
+            }
         } catch (e) {
             console.error("[Live2D] 模型加载失败:", e);
             live2dError.value = true;
@@ -323,17 +502,13 @@ export function useLive2D(
     function resizeLive2D(w: number, h: number) {
         if (!pixiApp || !live2dContainer || !displaySprite) return;
 
-        // 1. 渲染器 resize（同时更新 canvas 的 width/height attribute）
         pixiApp.renderer.resize(w, h);
 
-        // 2. 销毁旧 RenderTexture，重建新尺寸的
         renderTexture?.destroy(true);
         renderTexture = PIXI.RenderTexture.create({ width: w, height: h });
 
-        // 3. 更新 sprite 的纹理引用
         displaySprite.texture = renderTexture;
 
-        // 4. 重算模型缩放与位置
         if (live2dModel) {
             const modelPath = localStorage.getItem("rl-model-path") ?? "";
             const { zoom, y } = getModelSettings(modelPath);
@@ -346,8 +521,6 @@ export function useLive2D(
         console.info(`[Live2D] 尺寸已更新：${w} × ${h}`);
     }
 
-    // [FIX] 监听 BASE_W 变化，自动触发 resizeLive2D
-    // BASE_W 与 BASE_H / INPUT_W / BUBBLE_H 同档联动，监听一个即可。
     watch(BASE_W, (newW) => {
         resizeLive2D(newW, BASE_H.value);
     });
@@ -368,6 +541,7 @@ export function useLive2D(
         }
         if (!canvasRef.value) return;
 
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         if (typeof (window as any).Live2DCubismCore === "undefined") {
             console.warn("[Live2D] Cubism Core 未加载，请放入 public/ 并取消注释 index.html 中的 script 标签。");
             live2dError.value = true;
@@ -390,7 +564,6 @@ export function useLive2D(
         const renderer = pixiApp.renderer as PIXI.Renderer;
 
         renderTexture = PIXI.RenderTexture.create({ width: w, height: h });
-        // [FIX] 将 sprite 赋给模块变量 displaySprite，供 resizeLive2D 使用
         displaySprite = new PIXI.Sprite(renderTexture);
         pixiApp.stage.addChild(displaySprite);
         live2dContainer = new PIXI.Container();
@@ -398,7 +571,6 @@ export function useLive2D(
         pixiApp.ticker.add(() => {
             if (!live2dReady.value) return;
 
-            // stepped 参数二值化（作为 coreModel hook 失败时的后备）
             if (steppedParamIds.length > 0 && live2dModel) {
                 try {
                     const core = live2dModel.internalModel.coreModel;
@@ -414,12 +586,12 @@ export function useLive2D(
         });
 
         // 模型加载在后台进行，不阻塞 initLive2D 返回
-        // live2dReady 会在 loadModel 完成后变为 true，Ticker 届时开始渲染模型
         loadModel();
     }
 
     function disposeLive2D() {
         if (emotionResetTimer) clearTimeout(emotionResetTimer);
+        stopIdleTimer();  // [Phase 4] 清理待机计时
         if (live2dModel && live2dContainer) live2dContainer.removeChild(live2dModel);
         live2dContainer?.destroy({ children: true });
         renderTexture?.destroy(true);
@@ -427,7 +599,7 @@ export function useLive2D(
         live2dModel = null;
         live2dContainer = null;
         renderTexture = null;
-        displaySprite = null;   // [FIX] 同步清理
+        displaySprite = null;
         pixiApp = null;
         live2dReady.value = false;
         live2dError.value = false;
@@ -442,6 +614,8 @@ export function useLive2D(
             return;
         }
 
+        // [Phase 4] 模型切换前先停止待机调度，避免旧计时器在新模型上触发
+        stopIdleTimer();
         live2dReady.value = false;
         steppedParamIds = [];
 
@@ -457,6 +631,11 @@ export function useLive2D(
             await setupFrameSwitchProtection(live2dModel, newPath);
             live2dReady.value = true;
             console.info(`[Live2D] 模型切换成功 ✓  (${newPath})`);
+            // 新模型就绪 → 按当前配置重新启动待机调度
+            if (idleConfig.enabled) {
+                rescheduleIdle();
+                console.info("[Live2D] 模型切换后，待机动画已在新模型上重启");
+            }
         } catch (e) {
             console.error("[Live2D] 模型切换失败:", e);
             live2dError.value = true;
@@ -473,5 +652,9 @@ export function useLive2D(
         setMouthOpen,
         getModelSettings,
         saveModelSettings,
+        // [Phase 4] 新增
+        playMotion,
+        getMotionList,
+        configureIdleMotion,
     };
 }
