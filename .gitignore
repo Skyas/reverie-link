@@ -32,6 +32,9 @@ __pycache__/
 *.pyc
 .env
 
+# MiniMax Agent 配置
+.minimax/
+
 # Rust 编译产物
 src-tauri/target/
 
