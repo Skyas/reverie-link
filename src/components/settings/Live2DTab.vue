@@ -1,6 +1,10 @@
 <script setup lang="ts">
     import { ref, onMounted } from "vue";
     import { revealItemInDir } from "@tauri-apps/plugin-opener";
+    import AppearancePanel from "./AppearancePanel.vue";
+
+    // 装扮区域展开状态（进入时才加载）
+    const appearanceExpanded = ref(false);
 
     // ── Toast ──────────────────────────────────────────────────────
     const msgText = ref("");
@@ -261,12 +265,19 @@
 
         <div class="divider"></div>
 
-        <!-- 装扮（Stage 2 占位） -->
-        <div class="global-section global-section-disabled">
-            <div class="global-section-title">🎨 装扮 <span class="coming-badge">开发中</span></div>
-            <div class="field-hint">
-                读取模型 cdi3.json，为每个参数渲染滑条，支持配件开关。
-                实时预览并保存至 public/live2d/&#123;模型文件夹&#125;/appearance.json。
+        <!-- 装扮 -->
+        <div class="global-section">
+            <div class="appearance-section-header" @click="appearanceExpanded = !appearanceExpanded">
+                <div class="global-section-title" style="cursor:pointer;">
+                    🎨 装扮
+                    <span class="expand-arrow" :class="{ expanded: appearanceExpanded }">▶</span>
+                </div>
+            </div>
+            <div v-if="appearanceExpanded" class="appearance-container">
+                <AppearancePanel />
+            </div>
+            <div v-else class="field-hint" style="cursor:pointer;" @click="appearanceExpanded = true">
+                点击展开，加载当前模型的装扮参数和部件开关。
             </div>
         </div>
 
@@ -528,5 +539,23 @@
     .field-disabled {
         opacity: 0.5;
         pointer-events: none;
+    }
+
+    /* ── 装扮区域 ─────────────────────────────────────────────── */
+    .appearance-section-header {
+        cursor: pointer;
+        user-select: none;
+    }
+    .expand-arrow {
+        font-size: 10px;
+        color: var(--c-text-soft);
+        transition: transform 0.2s;
+        display: inline-block;
+    }
+    .expand-arrow.expanded {
+        transform: rotate(90deg);
+    }
+    .appearance-container {
+        padding: 8px 0 0;
     }
 </style>

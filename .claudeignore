@@ -1,0 +1,12 @@
+# MiniMax Agent 配置
+.minimax/
+
+# 版本控制
+.git/
+
+# 依赖目录
+node_modules/
+venv/
+
+# 数据目录（保留目录本身）
+data/*

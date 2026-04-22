@@ -20,6 +20,8 @@ const {
     live2dReady, live2dError,
     initLive2D, disposeLive2D, reloadLive2D,
     setEmotion, setMouthOpen, configureIdleMotion,
+    // [Phase 4] 装扮系统
+    getCoreParameters, getCoreParts, applyAppearance,
 } = useLive2D(canvasRef, BASE_W, BASE_H);
 
 // ── 3. TTS ─────────────────────────────────────────────────────────────
@@ -288,6 +290,24 @@ onMounted(async () => {
     }>("idle-motion-changed", (e) => {
         console.info("[App] 收到 idle-motion-changed:", e.payload);
         configureIdleMotion(e.payload);
+    }));
+
+    // [Phase 4] 装扮面板请求 core params（设置窗口 → 主窗口）
+    unlisten.push(await listen("request-core-params", async () => {
+        console.info("[App] 收到 request-core-params");
+        const params = getCoreParameters();
+        const parts = getCoreParts();
+        const { emit: tauriEmit } = await import("@tauri-apps/api/event");
+        await tauriEmit("core-params-response", { params, parts });
+        console.info(`[App] 已回复 core-params-response: ${params.length} params, ${parts.length} parts`);
+    }));
+
+    // [Phase 4] 装扮面板实时预览（设置窗口 → 主窗口）
+    unlisten.push(await listen<{
+        parameters: Record<string, number>;
+        parts: Record<string, number>;
+    }>("apply-appearance", (e) => {
+        applyAppearance(e.payload);
     }));
 
     window.addEventListener("storage", onStorageChange);
