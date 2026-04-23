@@ -19,7 +19,9 @@ const canvasRef = ref<HTMLCanvasElement | null>(null);
 const {
     live2dReady, live2dError,
     initLive2D, disposeLive2D, reloadLive2D,
-    setEmotion, setMouthOpen,
+    setEmotion, setMouthOpen, configureIdleMotion,
+    // [Phase 4] 装扮系统
+    getCoreParameters, getCoreParts, applyAppearance,
 } = useLive2D(canvasRef, BASE_W, BASE_H);
 
 // ── 3. TTS ─────────────────────────────────────────────────────────────
@@ -146,6 +148,24 @@ async function syncTrayMenu() {
 async function openSettings() { await invoke("open_settings"); }
 async function openHistory() { await invoke("open_history"); }
 
+// ── [Phase 4] 待机动画配置加载助手 ─────────────────────────────────────
+// 从 localStorage 读取 rl-idle-motion 并推给 useLive2D。
+// 启动时调用一次；设置界面也通过 idle-motion-changed 事件触发。
+function applyIdleMotionFromStorage() {
+    try {
+        const raw = localStorage.getItem("rl-idle-motion");
+        if (!raw) {
+            console.info("[App] 无待机动画配置，使用默认（关闭）");
+            return;
+        }
+        const cfg = JSON.parse(raw);
+        configureIdleMotion(cfg);
+        console.info("[App] 待机动画配置已从 localStorage 应用:", cfg);
+    } catch (e) {
+        console.warn("[App] 加载待机动画配置失败:", e);
+    }
+}
+
 // ── 生命周期 ───────────────────────────────────────────────────────────
 const unlisten: (() => void)[] = [];
 
@@ -176,6 +196,12 @@ onMounted(async () => {
             console.timeEnd("[⏱ initLive2D]");
         })(),
     ]);
+
+    // [Phase 4] Live2D 初始化完成后应用待机动画配置。
+    // 注意：initLive2D 不 await 模型加载（是 fire-and-forget），
+    // 但 configureIdleMotion 内部会在模型就绪后（loadModel 末尾）自动启动调度。
+    // 所以这里安全调用，无需等待模型。
+    applyIdleMotionFromStorage();
 
     // 后端就绪后同步托盘（延迟 2s 确保 sidecar 已启动）
     setTimeout(syncTrayMenu, 2000);
@@ -255,7 +281,35 @@ onMounted(async () => {
         await reloadLive2D(path);
         syncTrayMenu(); // 通知 Rust 侧更新勾选
     }));
-    
+
+    // [Phase 4] 设置界面 Live2D Tab 推送的待机动画配置变更
+    unlisten.push(await listen<{
+        enabled: boolean;
+        minInterval: number;
+        maxInterval: number;
+    }>("idle-motion-changed", (e) => {
+        console.info("[App] 收到 idle-motion-changed:", e.payload);
+        configureIdleMotion(e.payload);
+    }));
+
+    // [Phase 4] 装扮面板请求 core params（设置窗口 → 主窗口）
+    unlisten.push(await listen("request-core-params", async () => {
+        console.info("[App] 收到 request-core-params");
+        const params = getCoreParameters();
+        const parts = getCoreParts();
+        const { emit: tauriEmit } = await import("@tauri-apps/api/event");
+        await tauriEmit("core-params-response", { params, parts });
+        console.info(`[App] 已回复 core-params-response: ${params.length} params, ${parts.length} parts`);
+    }));
+
+    // [Phase 4] 装扮面板实时预览（设置窗口 → 主窗口）
+    unlisten.push(await listen<{
+        parameters: Record<string, number>;
+        parts: Record<string, number>;
+    }>("apply-appearance", (e) => {
+        applyAppearance(e.payload);
+    }));
+
     window.addEventListener("storage", onStorageChange);
 
     console.timeEnd("[⏱ onMounted 总耗时]");

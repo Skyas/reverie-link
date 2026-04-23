@@ -10,9 +10,6 @@ export default defineConfig(async () => ({
     clearScreen: false,
 
     // ── 预构建优化 ─────────────────────────────────────────────────
-    // 显式列出重量级依赖，让 Vite 在首次启动时即完成 CJS→ESM 转换并缓存，
-    // 后续启动直接复用缓存，跳过依赖扫描阶段。
-    // pixi.js + pixi-live2d-display 是项目中体积最大的两个包，预构建收益最显著。
     optimizeDeps: {
         include: [
             "pixi.js",
@@ -27,9 +24,10 @@ export default defineConfig(async () => ({
     build: {
         rollupOptions: {
             input: {
-                main:     resolve(__dirname, "index.html"),
-                settings: resolve(__dirname, "settings.html"),
-                history:  resolve(__dirname, "history.html"),
+                main:       resolve(__dirname, "index.html"),
+                settings:   resolve(__dirname, "settings.html"),
+                history:    resolve(__dirname, "history.html"),
+                appearance: resolve(__dirname, "appearance.html"),
             },
         },
     },
@@ -41,11 +39,11 @@ export default defineConfig(async () => ({
         hmr: host ? { protocol: "ws", host, port: 17421 } : undefined,
         watch: { 
             ignored: [
-                "**/src-tauri/**",     // Tauri Rust 代码
-                "**/venv/**",          // Python 虚拟环境（核心性能杀手）
-                "**/.venv/**",         // 兼容其他命名习惯的虚拟环境
-                "**/sidecar/**",       // Python 后端源码
-                "**/public/live2d/**"  // 庞大的静态模型资源（不需要热更新参与编译）
+                "**/src-tauri/**",
+                "**/venv/**",
+                "**/.venv/**",
+                "**/sidecar/**",
+                "**/public/live2d/**"
             ] 
         },
     },

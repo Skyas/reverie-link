@@ -1,12 +1,11 @@
 <script setup lang="ts">
-    import { ref, onMounted } from "vue";
-    import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+    import { ref } from "vue";
 
     // ── Props / Emits ──────────────────────────────────────────────
     const emit = defineEmits<{
         "vision-saved": [cfg: object];
         "memory-window-changed": [index: number];
-        "size-preset-changed": [preset: string];  // [FIX] 新增：尺寸切换实时生效
+        "size-preset-changed": [preset: string];  // [FIX] 尺寸切换实时生效
     }>();
 
     // ── Toast ──────────────────────────────────────────────────────
@@ -15,82 +14,6 @@
     function showMsg(text: string, type: "ok" | "warn" = "ok") {
         msgText.value = text; msgType.value = type;
         setTimeout(() => { msgText.value = ""; }, 2500);
-    }
-
-    // ── Live2D 模型 ────────────────────────────────────────────────
-    interface Live2DModelInfo { folder: string; display_name: string; path: string; }
-
-    const live2dModels = ref<Live2DModelInfo[]>([]);
-    const modelsLoading = ref(false);
-    const selectedModelPath = ref<string>(localStorage.getItem("rl-model-path") ?? "live2d/MO/MO.model3.json");
-    const MODEL_SETTINGS_KEY = "rl-model-settings";
-    const modelZoom = ref<number>(1.7);
-    const modelY = ref<number>(-80);
-
-    function loadModelDisplaySettings(path: string) {
-        try {
-            const all = JSON.parse(localStorage.getItem(MODEL_SETTINGS_KEY) ?? "{}");
-            const s = all[path];
-            if (s && typeof s.zoom === "number" && typeof s.y === "number") {
-                modelZoom.value = s.zoom; modelY.value = s.y; return;
-            }
-        } catch { /* ignore */ }
-        modelZoom.value = 1.7; modelY.value = -80;
-    }
-
-    function saveModelDisplaySettings() {
-        const path = selectedModelPath.value;
-        try {
-            const all = JSON.parse(localStorage.getItem(MODEL_SETTINGS_KEY) ?? "{}");
-            all[path] = { zoom: modelZoom.value, y: modelY.value };
-            localStorage.setItem(MODEL_SETTINGS_KEY, JSON.stringify(all));
-        } catch { /* ignore */ }
-    }
-
-    async function fetchLive2DModels() {
-        modelsLoading.value = true;
-        try {
-            const res = await fetch("http://localhost:18000/api/live2d/models");
-            const data = await res.json();
-            live2dModels.value = data.models ?? [];
-        } catch {
-            live2dModels.value = [];
-            showMsg("无法连接后端，请确认 Python 服务已启动", "warn");
-        } finally { modelsLoading.value = false; }
-    }
-
-    async function applyModel(path: string) {
-        selectedModelPath.value = path;
-        localStorage.setItem("rl-model-path", path);
-        loadModelDisplaySettings(path);
-        try {
-            const { emit: tauriEmit } = await import("@tauri-apps/api/event");
-            await tauriEmit("model-changed", { path });
-        } catch (e) { console.warn("[model switch] emit failed:", e); }
-        showMsg("✓ 模型已切换");
-    }
-
-    async function applyModelSettings() {
-        saveModelDisplaySettings();
-        try {
-            const { emit: tauriEmit } = await import("@tauri-apps/api/event");
-            await tauriEmit("model-changed", { path: selectedModelPath.value });
-        } catch (e) { console.warn("[model settings] emit failed:", e); }
-        showMsg("✓ 显示设置已应用");
-    }
-
-    async function openLive2DFolder() {
-        try {
-            const res = await fetch("http://localhost:18000/api/folder-paths");
-            const { live2d } = await res.json();
-            
-            await revealItemInDir(live2d);
-            console.log("[LLMTab] 打开 RVC 文件夹:", live2d);
-        } catch (e) {
-            console.warn("[GlobalTab] 打开文件夹失败:", e);
-            console.error("[openFolder] 完整错误:", e);
-            showMsg("无法打开文件夹", "warn");
-        }
     }
 
     // ── 窗口尺寸 ───────────────────────────────────────────────────
@@ -104,14 +27,14 @@
     function applySize(preset: string) {
         sizePreset.value = preset;
         localStorage.setItem("rl-size", preset);
-        emit("size-preset-changed", preset);  // [FIX] 通知父组件，触发主窗口实时 resize
-        showMsg("✓ 尺寸已切换");              // [FIX] 去掉"重启后生效"提示
+        emit("size-preset-changed", preset);
+        showMsg("✓ 尺寸已切换");
     }
 
     // ── 视觉感知 ───────────────────────────────────────────────────
     const VISION_TALK_OPTIONS = [
         { value: 0, label: "话少", desc: "阈值 30，安静" },
-        { value: 1, label: "适中（默认）", desc: "阈值 20，平衡" },
+        { value: 1, label: "适中（默认）", desc: "阈值 20,平衡" },
         { value: 2, label: "话多", desc: "阈值 12，活跃" },
     ];
 
@@ -159,12 +82,6 @@
         emit("memory-window-changed", index);
         showMsg(`✓ 记忆跨度已切换至「${MEMORY_WINDOW_OPTIONS[index].label}」`);
     }
-
-    // ── 初始化 ─────────────────────────────────────────────────────
-    onMounted(async () => {
-        loadModelDisplaySettings(selectedModelPath.value);
-        await fetchLive2DModels();
-    });
 </script>
 
 <template>
@@ -174,65 +91,6 @@
         <transition name="toast">
             <div v-if="msgText" class="toast" :class="{ warn: msgType === 'warn' }">{{ msgText }}</div>
         </transition>
-
-        <!-- Live2D 模型 -->
-        <div class="global-section">
-            <div class="global-section-title">
-                🎭 Live2D 模型
-                <span class="field-note">将模型文件夹放入 public/live2d/ 即可识别</span>
-            </div>
-
-            <div v-if="modelsLoading" class="models-loading">扫描中…</div>
-            <div v-else-if="live2dModels.length === 0" class="models-empty">
-                <p>未找到模型</p>
-                <p class="field-note">请将 Live2D 模型文件夹放入项目的 <code>public/live2d/</code> 目录</p>
-                <button class="refresh-btn" @click="fetchLive2DModels">重新扫描</button>
-            </div>
-            <div v-else class="models-list">
-                <div v-for="m in live2dModels" :key="m.path"
-                     class="model-card" :class="{ active: selectedModelPath === m.path }"
-                     @click="applyModel(m.path)">
-                    <div class="model-icon">🪆</div>
-                    <div class="model-info">
-                        <div class="model-name">{{ m.display_name }}</div>
-                        <div class="model-path">{{ m.path }}</div>
-                    </div>
-                    <div v-if="selectedModelPath === m.path" class="model-active-badge">使用中</div>
-                </div>
-                <div style="display:flex; gap:8px;">
-                    <button class="refresh-btn" @click="fetchLive2DModels">🔄 重新扫描</button>
-                    <button class="refresh-btn" @click="openLive2DFolder">📂 打开文件夹</button>
-                </div>
-            </div>
-
-            <!-- 模型显示调整 -->
-            <div class="model-display-settings">
-                <div class="global-section-title" style="font-size:12px;">📐 当前模型显示调整</div>
-                <div class="field-row">
-                    <div class="field-group half">
-                        <label class="field-label">缩放 Zoom <span class="field-note">默认 1.7</span></label>
-                        <div class="zoom-input-row">
-                            <input type="range" class="field-range" :min="0.5" :max="3.0" :step="0.05"
-                                   v-model.number="modelZoom" />
-                            <span class="zoom-value">{{ modelZoom.toFixed(2) }}</span>
-                        </div>
-                    </div>
-                    <div class="field-group half">
-                        <label class="field-label">垂直偏移 Y <span class="field-note">默认 -80</span></label>
-                        <div class="zoom-input-row">
-                            <input type="range" class="field-range" :min="-400" :max="200" :step="5"
-                                   v-model.number="modelY" />
-                            <span class="zoom-value">{{ modelY }}</span>
-                        </div>
-                    </div>
-                </div>
-                <div class="action-row" style="padding-top:4px;">
-                    <button class="save-btn" style="padding:6px 18px;font-size:12px;" @click="applyModelSettings">应用</button>
-                </div>
-            </div>
-        </div>
-
-        <div class="divider"></div>
 
         <!-- 窗口尺寸 -->
         <div class="global-section">
@@ -245,7 +103,6 @@
                     <div class="size-desc">{{ opt.desc }}</div>
                 </div>
             </div>
-            <!-- [FIX] 移除"重启后生效"提示，切换即时生效 -->
         </div>
 
         <div class="divider"></div>
@@ -372,16 +229,17 @@
 
 <style scoped>
     .toast {
-    position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
-    padding: 8px 20px; border-radius: 20px;
-    background: linear-gradient(white, white) padding-box,
-                linear-gradient(135deg, #A8D8EA, #FFB7C5) border-box;
-    border: 2px solid transparent;
-    color: #4A4A6A;
-    font-size: 13px; font-weight: 600;
-    box-shadow: 0 4px 20px rgba(80, 60, 120, 0.22);
-    z-index: 200; pointer-events: none; white-space: nowrap;
+        position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
+        padding: 8px 20px; border-radius: 20px;
+        background: linear-gradient(white, white) padding-box,
+                    linear-gradient(135deg, #A8D8EA, #FFB7C5) border-box;
+        border: 2px solid transparent;
+        color: #4A4A6A;
+        font-size: 13px; font-weight: 600;
+        box-shadow: 0 4px 20px rgba(80, 60, 120, 0.22);
+        z-index: 200; pointer-events: none; white-space: nowrap;
     }
+
     .toast.warn {
         background: linear-gradient(white, white) padding-box,
                     linear-gradient(135deg, #F0A0A0, #E08080) border-box;
@@ -403,143 +261,6 @@
 
     .toast-leave-to {
         opacity: 0;
-    }
-
-    /* Live2D 模型 */
-    .models-loading {
-        color: var(--c-text-soft);
-        font-size: 13px;
-        padding: 8px 0;
-    }
-
-    .models-empty {
-        display: flex;
-        flex-direction: column;
-        gap: 6px;
-        padding: 8px 0;
-    }
-
-        .models-empty p {
-            font-size: 13px;
-            color: var(--c-text-soft);
-        }
-
-            .models-empty code, .models-empty p code {
-                font-size: 12px;
-                background: var(--c-pink-light);
-                padding: 1px 6px;
-                border-radius: 4px;
-            }
-
-    .models-list {
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-    }
-
-    .model-card {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        background: var(--c-surface);
-        border: 1.5px solid var(--c-border);
-        border-radius: 12px;
-        padding: 10px 12px;
-        cursor: pointer;
-        transition: border-color 0.2s, box-shadow 0.2s;
-    }
-
-        .model-card:hover {
-            border-color: var(--c-pink-mid);
-        }
-
-        .model-card.active {
-            border-color: var(--c-blue);
-            box-shadow: 0 0 0 3px var(--c-blue-light);
-        }
-
-    .model-icon {
-        font-size: 22px;
-        flex-shrink: 0;
-    }
-
-    .model-info {
-        flex: 1;
-        min-width: 0;
-    }
-
-    .model-name {
-        font-size: 13px;
-        font-weight: 600;
-        color: var(--c-text);
-    }
-
-    .model-path {
-        font-size: 11px;
-        color: var(--c-text-soft);
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-    }
-
-    .model-active-badge {
-        font-size: 10px;
-        font-weight: 600;
-        color: white;
-        background: var(--c-blue);
-        padding: 2px 8px;
-        border-radius: 10px;
-        flex-shrink: 0;
-    }
-
-    .refresh-btn {
-        align-self: flex-start;
-        margin-top: 4px;
-        font-size: 12px;
-        padding: 4px 14px;
-        border: 1.5px solid var(--c-blue);
-        border-radius: 20px;
-        background: transparent;
-        color: var(--c-blue);
-        cursor: pointer;
-        font-family: inherit;
-        transition: background 0.2s, color 0.2s;
-    }
-
-        .refresh-btn:hover {
-            background: var(--c-blue);
-            color: white;
-        }
-
-    /* 模型显示设置 */
-    .model-display-settings {
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-        padding: 10px 12px;
-        background: var(--c-surface);
-        border: 1.5px solid var(--c-border);
-        border-radius: 12px;
-        margin-top: 4px;
-    }
-
-    .zoom-input-row {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-    }
-
-        .zoom-input-row .field-range {
-            flex: 1;
-        }
-
-    .zoom-value {
-        font-size: 12px;
-        font-weight: 600;
-        color: var(--c-text);
-        min-width: 38px;
-        text-align: right;
-        flex-shrink: 0;
     }
 
     /* 尺寸 */

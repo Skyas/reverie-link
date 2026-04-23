@@ -1,5 +1,5 @@
 /**
- * useLive2D.ts — Live2D 渲染、表情与唇音口型驱动
+ * useLive2D.ts — Live2D 渲染、表情、唇音、动作调度、装扮系统
  *
  * 职责：
  *   - PIXI Application 初始化 / 销毁 / 模型热切换
@@ -7,6 +7,13 @@
  *   - 表情系统（expression 接口 / 参数直驱 fallback）
  *   - 嘴部开合参数驱动（由 useTTS 通过 setMouthOpen 调用）
  *   - 尺寸响应式更新（BASE_W 变化时自动 resize 渲染器 + 模型缩放）
+ *   - 【Phase 4】动作调度：
+ *       · 待机随机（NORMAL 优先级，配置化间隔）
+ *       · 高优先级通道 playMotion（FORCE，自动打断 + 重置待机计时）
+ *   - 【Phase 4】装扮系统：
+ *       · 模型加载完成后自动从后端拉取 appearance.json 并应用
+ *       · 对外暴露 getCoreParameters / getCoreParts / applyAppearance
+ *         供装扮面板实时预览和保存
  *
  * 依赖注入：
  *   canvasRef  — HTMLCanvasElement 的 Ref，由 App.vue 传入
@@ -14,16 +21,17 @@
  *
  * 不知道 TTS、WebSocket、窗口几何的存在。
  *
- * 性能说明：
- *   Live2DModel.from() 在 WebView2 dev 模式下需要 7~8 秒（Cubism Core 初始化 +
- *   WebGL 纹理创建的开销，与模型文件大小无关）。为避免阻塞窗口显示，initLive2D()
- *   在创建完 PIXI Application 后立即返回，模型在后台异步加载。Ticker 渲染受
- *   live2dReady 守卫保护，模型就绪前不渲染 live2dContainer，避免空容器闪烁。
+ * 装扮系统说明（Phase 4）：
+ *   模型加载完成后（setupFrameSwitchProtection 之后、live2dReady = true 之前），
+ *   自动 fetch 后端 /api/live2d/appearance-schema 获取已存的 appearance.json 内容，
+ *   通过 applyAppearance 还原用户上次的装扮。
+ *   装扮面板通过 getCoreParameters / getCoreParts 获取运行时参数范围，
+ *   通过 applyAppearance 实时预览。
  */
 
 import { ref, watch, type Ref, type ComputedRef } from "vue";
 import * as PIXI from "pixi.js";
-import { Live2DModel } from "pixi-live2d-display/cubism4";
+import { Live2DModel, MotionPriority } from "pixi-live2d-display/cubism4";
 import { type EmotionTag } from "./utils/emotion";
 
 // Ticker 只注册一次（模块级 flag）
@@ -51,13 +59,52 @@ function saveModelSettings(path: string, zoom: number, y: number) {
     } catch { /* ignore */ }
 }
 
+// ── 待机动画默认配置 ─────────────────────────────────────────────────
+export const IDLE_MOTION_DEFAULT = {
+    enabled: false,
+    minInterval: 30,
+    maxInterval: 60,
+};
+export type IdleMotionConfig = typeof IDLE_MOTION_DEFAULT;
+
+// ── 装扮系统类型（Phase 4）───────────────────────────────────────────
+export interface CoreParameter {
+    id: string;
+    min: number;
+    max: number;
+    default: number;
+    current: number;
+}
+
+export interface CorePart {
+    id: string;
+    opacity: number;
+}
+
+export interface AppearanceConfig {
+    parameters: Record<string, number>;
+    parts: Record<string, number>;
+}
+
+// ── 后端 sidecar 地址 ───────────────────────────────────────────────
+const SIDECAR_URL = "http://localhost:18000";
+
+// ── 辅助：从模型路径中提取文件夹名 ───────────────────────────────────
+// "live2d/hiyori_vts/hiyori.model3.json" → "hiyori_vts"
+function _extractFolderName(modelPath: string): string {
+    const parts = modelPath.replace(/\\/g, "/").split("/");
+    if (parts.length >= 3 && parts[0] === "live2d") {
+        return parts[1];
+    }
+    return parts.length >= 2 ? parts[parts.length - 2] : "";
+}
+
 // ── 主体 ──────────────────────────────────────────────────────────────
 export function useLive2D(
     canvasRef: Ref<HTMLCanvasElement | null>,
     BASE_W: ComputedRef<number>,
     BASE_H: ComputedRef<number>,
 ) {
-    // Ticker 注册（仅第一次）
     if (!tickerRegistered) {
         Live2DModel.registerTicker(PIXI.Ticker);
         tickerRegistered = true;
@@ -69,17 +116,18 @@ export function useLive2D(
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let pixiApp: PIXI.Application | null = null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let live2dModel: any = null;
     let live2dContainer: PIXI.Container | null = null;
     let renderTexture: PIXI.RenderTexture | null = null;
-    // [FIX] 将 sprite 提升为模块变量，供 resizeLive2D 更新纹理引用
     let displaySprite: PIXI.Sprite | null = null;
 
-    // 帧切换保护用
     let steppedParamIds: string[] = [];
-
-    // 表情重置计时器
     let emotionResetTimer: ReturnType<typeof setTimeout> | null = null;
+
+    // ── 待机动画调度状态 ──────────────────────────────────────────────
+    let idleConfig: IdleMotionConfig = { ...IDLE_MOTION_DEFAULT };
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
 
     // ── 帧切换参数保护 ────────────────────────────────────────────────
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -271,6 +319,235 @@ export function useLive2D(
         } catch { /* ignore */ }
     }
 
+    // ── 动作调度 ──────────────────────────────────────────────────────
+
+    function getMotionList(): { group: string; count: number }[] {
+        if (!live2dModel || !live2dReady.value) return [];
+        try {
+            const defs = live2dModel.internalModel?.motionManager?.definitions;
+            if (!defs || typeof defs !== "object") return [];
+            const result: { group: string; count: number }[] = [];
+            for (const [group, list] of Object.entries(defs)) {
+                if (group.toLowerCase() === "idle") continue;
+                if (Array.isArray(list) && list.length > 0) {
+                    result.push({ group, count: list.length });
+                }
+            }
+            return result;
+        } catch (e) {
+            console.warn("[Live2D] getMotionList 失败:", e);
+            return [];
+        }
+    }
+
+    function playMotion(group: string, index?: number) {
+        if (!live2dModel || !live2dReady.value) {
+            console.warn("[Live2D] playMotion 失败：模型未就绪");
+            return;
+        }
+        try {
+            const promise = live2dModel.motion(group, index, MotionPriority.FORCE);
+            console.info(
+                `[Live2D] playMotion: group="${group}" index=${index ?? "random"} priority=FORCE`
+            );
+            if (idleConfig.enabled) {
+                rescheduleIdle();
+                console.info("[Live2D] 高优先级动作触发后，待机计时已重置");
+            }
+            return promise;
+        } catch (e) {
+            console.warn("[Live2D] playMotion 异常:", e);
+        }
+    }
+
+    function fireIdleRandom() {
+        if (!live2dModel || !live2dReady.value) return;
+        const list = getMotionList();
+        if (list.length === 0) return;
+        const group = list[Math.floor(Math.random() * list.length)];
+        const index = Math.floor(Math.random() * group.count);
+        try {
+            live2dModel.motion(group.group, index, MotionPriority.NORMAL);
+            console.info(
+                `[Live2D] 待机动画触发: group="${group.group}" index=${index}/${group.count}`
+            );
+        } catch (e) {
+            console.warn("[Live2D] 待机动画触发异常:", e);
+        }
+    }
+
+    function scheduleNextIdle() {
+        if (!idleConfig.enabled || !live2dReady.value) return;
+        const min = Math.max(1, idleConfig.minInterval);
+        const max = Math.max(min, idleConfig.maxInterval);
+        const delay = (min + Math.random() * (max - min)) * 1000;
+        idleTimer = setTimeout(() => {
+            idleTimer = null;
+            fireIdleRandom();
+            scheduleNextIdle();
+        }, delay);
+    }
+
+    function stopIdleTimer() {
+        if (idleTimer !== null) {
+            clearTimeout(idleTimer);
+            idleTimer = null;
+        }
+    }
+
+    function rescheduleIdle() {
+        stopIdleTimer();
+        scheduleNextIdle();
+    }
+
+    function configureIdleMotion(cfg: Partial<IdleMotionConfig>) {
+        idleConfig = { ...idleConfig, ...cfg };
+        if (idleConfig.minInterval < 1) idleConfig.minInterval = 1;
+        if (idleConfig.maxInterval < idleConfig.minInterval) {
+            idleConfig.maxInterval = idleConfig.minInterval;
+        }
+        console.info(
+            `[Live2D] 待机动画配置: enabled=${idleConfig.enabled} ` +
+            `interval=${idleConfig.minInterval}~${idleConfig.maxInterval}s`
+        );
+        if (!idleConfig.enabled) {
+            stopIdleTimer();
+        } else {
+            rescheduleIdle();
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // ── Phase 4：装扮系统 ─────────────────────────────────────────────
+    // ══════════════════════════════════════════════════════════════════
+
+    /**
+     * 读取当前模型所有参数的运行时元数据。
+     * 装扮面板需要这些数据来渲染滑条范围。
+     */
+    function getCoreParameters(): CoreParameter[] {
+        if (!live2dModel || !live2dReady.value) return [];
+        try {
+            const core = live2dModel.internalModel.coreModel;
+            const model = core._model;
+            const ids: string[] = model.parameters.ids;
+            const mins: Float32Array = model.parameters.minimumValues;
+            const maxs: Float32Array = model.parameters.maximumValues;
+            const defs: Float32Array = model.parameters.defaultValues;
+            const vals: Float32Array = model.parameters.values;
+
+            const result: CoreParameter[] = [];
+            for (let i = 0; i < ids.length; i++) {
+                result.push({
+                    id: ids[i],
+                    min: mins[i],
+                    max: maxs[i],
+                    default: defs[i],
+                    current: vals[i],
+                });
+            }
+            return result;
+        } catch (e) {
+            console.warn("[Live2D] getCoreParameters 失败:", e);
+            return [];
+        }
+    }
+
+    /**
+     * 读取当前模型所有 Part 的运行时 opacity。
+     * 装扮面板需要这些数据来渲染开关状态。
+     */
+    function getCoreParts(): CorePart[] {
+        if (!live2dModel || !live2dReady.value) return [];
+        try {
+            const core = live2dModel.internalModel.coreModel;
+            const model = core._model;
+            const ids: string[] = model.parts.ids;
+            const opacities: Float32Array = model.parts.opacities;
+
+            const result: CorePart[] = [];
+            for (let i = 0; i < ids.length; i++) {
+                result.push({
+                    id: ids[i],
+                    opacity: opacities[i],
+                });
+            }
+            return result;
+        } catch (e) {
+            console.warn("[Live2D] getCoreParts 失败:", e);
+            return [];
+        }
+    }
+
+    /**
+     * 应用装扮配置到当前模型。
+     * 幂等：重复调用同一份配置无副作用。
+     * 实时：装扮面板拖滑条时可每帧调用。
+     */
+    function applyAppearance(cfg: AppearanceConfig) {
+        if (!live2dModel) return;
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const core: any = live2dModel.internalModel?.coreModel;
+        if (!core) return;
+
+        let paramCount = 0;
+        let partCount = 0;
+
+        if (cfg.parameters) {
+            for (const [id, value] of Object.entries(cfg.parameters)) {
+                try {
+                    core.setParameterValueById(id, value);
+                    paramCount++;
+                } catch { /* 参数 id 不存在，静默跳过 */ }
+            }
+        }
+
+        if (cfg.parts) {
+            for (const [id, value] of Object.entries(cfg.parts)) {
+                try {
+                    core.setPartOpacityById(id, value);
+                    partCount++;
+                } catch { /* Part id 不存在，静默跳过 */ }
+            }
+        }
+
+        console.info(
+            `[Live2D] applyAppearance: ${paramCount} 参数 + ${partCount} 部件已应用`
+        );
+    }
+
+    /**
+     * 内部：从后端拉取 appearance.json 并应用。
+     * 在 loadModel / reloadLive2D 的模型就绪后、live2dReady 设 true 之前调用。
+     */
+    async function _loadAndApplyAppearance(modelPath: string) {
+        const folder = _extractFolderName(modelPath);
+        if (!folder) {
+            console.warn("[Live2D] 无法从路径提取 folder，跳过装扮还原:", modelPath);
+            return;
+        }
+
+        try {
+            const res = await fetch(
+                `${SIDECAR_URL}/api/live2d/appearance-schema?folder=${encodeURIComponent(folder)}`
+            );
+            if (!res.ok) {
+                console.warn(`[Live2D] 装扮 schema 请求失败: ${res.status}`);
+                return;
+            }
+            const data = await res.json();
+            if (data.appearance) {
+                applyAppearance(data.appearance);
+                console.info(`[Live2D] 装扮已从 appearance.json 还原 (${folder})`);
+            } else {
+                console.info(`[Live2D] ${folder} 无已存装扮，使用默认`);
+            }
+        } catch (e) {
+            console.warn("[Live2D] 装扮还原失败（sidecar 未就绪？）:", e);
+        }
+    }
+
     // ── 内部辅助：将模型挂载到容器并应用位置 ─────────────────────────
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     function mountModel(model: any, path: string, w: number) {
@@ -282,23 +559,18 @@ export function useLive2D(
         model.y = y;
         live2dContainer!.addChild(model);
 
-        try {
-            const core = model.internalModel.coreModel;
-            core.setPartOpacityById("PartArmA", 1);
-            core.setPartOpacityById("PartArmB", 0);
-        } catch { /* ignore */ }
+        // hiyori 模型特有：PartArmA/PartArmB 多状态手臂归位
+        if (path.toLowerCase().includes("hiyori")) {
+            try {
+                const core = model.internalModel.coreModel;
+                core.setPartOpacityById("PartArmA", 1);
+                core.setPartOpacityById("PartArmB", 0);
+                console.info("[Live2D] hiyori 专属：已归位 PartArmA=1, PartArmB=0");
+            } catch { /* ignore */ }
+        }
     }
 
     // ── 内部辅助：后台加载模型 ───────────────────────────────────────
-    /**
-     * 异步加载 Live2D 模型到已就绪的 PIXI 容器中。
-     * 由 initLive2D() 以 fire-and-forget 方式调用（不 await），
-     * 使窗口可以立即显示占位剪影，模型加载完成后自然出现。
-     *
-     * Ticker 渲染受 live2dReady 守卫保护：
-     * 模型就绪前 → Ticker 只 clear renderTexture（透明画布，剪影可见）
-     * 模型就绪后 → Ticker 正常渲染 live2dContainer
-     */
     async function loadModel() {
         try {
             const modelPath = localStorage.getItem("rl-model-path") ?? "live2d/MO/MO.model3.json";
@@ -306,34 +578,34 @@ export function useLive2D(
             live2dContainer!.removeChildren();
             mountModel(live2dModel, modelPath, BASE_W.value);
             await setupFrameSwitchProtection(live2dModel, modelPath);
-            // 一切就绪后才设为 true，Ticker 才开始渲染模型
+
+            // [Phase 4] 装扮还原：在 live2dReady = true 之前应用，
+            // 避免用户看到"先默认样 → 再切装扮样"的闪烁
+            await _loadAndApplyAppearance(modelPath);
+
             live2dReady.value = true;
+
+            if (idleConfig.enabled) {
+                rescheduleIdle();
+                console.info("[Live2D] 模型加载完成，待机动画已启动");
+            }
         } catch (e) {
             console.error("[Live2D] 模型加载失败:", e);
             live2dError.value = true;
         }
     }
 
-    // ── [FIX] 响应式尺寸更新 ──────────────────────────────────────────
-    // 当 BASE_W / BASE_H 变化时（用户切换尺寸档位），同步更新：
-    //   1. PIXI 渲染器尺寸
-    //   2. RenderTexture（需销毁重建，不支持 resize）
-    //   3. displaySprite 的纹理引用
-    //   4. 模型缩放与位置
+    // ── 响应式尺寸更新 ────────────────────────────────────────────────
     function resizeLive2D(w: number, h: number) {
         if (!pixiApp || !live2dContainer || !displaySprite) return;
 
-        // 1. 渲染器 resize（同时更新 canvas 的 width/height attribute）
         pixiApp.renderer.resize(w, h);
 
-        // 2. 销毁旧 RenderTexture，重建新尺寸的
         renderTexture?.destroy(true);
         renderTexture = PIXI.RenderTexture.create({ width: w, height: h });
 
-        // 3. 更新 sprite 的纹理引用
         displaySprite.texture = renderTexture;
 
-        // 4. 重算模型缩放与位置
         if (live2dModel) {
             const modelPath = localStorage.getItem("rl-model-path") ?? "";
             const { zoom, y } = getModelSettings(modelPath);
@@ -346,21 +618,11 @@ export function useLive2D(
         console.info(`[Live2D] 尺寸已更新：${w} × ${h}`);
     }
 
-    // [FIX] 监听 BASE_W 变化，自动触发 resizeLive2D
-    // BASE_W 与 BASE_H / INPUT_W / BUBBLE_H 同档联动，监听一个即可。
     watch(BASE_W, (newW) => {
         resizeLive2D(newW, BASE_H.value);
     });
 
     // ── 核心 API ──────────────────────────────────────────────────────
-    /**
-     * 初始化 PIXI Application + RenderTexture + Ticker，然后立即返回。
-     * 模型加载（Live2DModel.from()，WebView2 dev 下约 7~8 秒）在后台异步进行。
-     *
-     * 用户体验：窗口瞬间出现（占位剪影可见） → 数秒后模型淡入替换剪影。
-     *
-     * ⚠️  需要 public/live2dcubismcore.min.js 已加载（见 index.html）。
-     */
     async function initLive2D() {
         if (pixiApp) {
             console.warn("[Live2D] initLive2D 重复调用，已跳过");
@@ -368,6 +630,7 @@ export function useLive2D(
         }
         if (!canvasRef.value) return;
 
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         if (typeof (window as any).Live2DCubismCore === "undefined") {
             console.warn("[Live2D] Cubism Core 未加载，请放入 public/ 并取消注释 index.html 中的 script 标签。");
             live2dError.value = true;
@@ -390,7 +653,6 @@ export function useLive2D(
         const renderer = pixiApp.renderer as PIXI.Renderer;
 
         renderTexture = PIXI.RenderTexture.create({ width: w, height: h });
-        // [FIX] 将 sprite 赋给模块变量 displaySprite，供 resizeLive2D 使用
         displaySprite = new PIXI.Sprite(renderTexture);
         pixiApp.stage.addChild(displaySprite);
         live2dContainer = new PIXI.Container();
@@ -398,7 +660,6 @@ export function useLive2D(
         pixiApp.ticker.add(() => {
             if (!live2dReady.value) return;
 
-            // stepped 参数二值化（作为 coreModel hook 失败时的后备）
             if (steppedParamIds.length > 0 && live2dModel) {
                 try {
                     const core = live2dModel.internalModel.coreModel;
@@ -413,13 +674,12 @@ export function useLive2D(
             renderer.render(live2dContainer!, { renderTexture: renderTexture!, clear: true });
         });
 
-        // 模型加载在后台进行，不阻塞 initLive2D 返回
-        // live2dReady 会在 loadModel 完成后变为 true，Ticker 届时开始渲染模型
         loadModel();
     }
 
     function disposeLive2D() {
         if (emotionResetTimer) clearTimeout(emotionResetTimer);
+        stopIdleTimer();
         if (live2dModel && live2dContainer) live2dContainer.removeChild(live2dModel);
         live2dContainer?.destroy({ children: true });
         renderTexture?.destroy(true);
@@ -427,7 +687,7 @@ export function useLive2D(
         live2dModel = null;
         live2dContainer = null;
         renderTexture = null;
-        displaySprite = null;   // [FIX] 同步清理
+        displaySprite = null;
         pixiApp = null;
         live2dReady.value = false;
         live2dError.value = false;
@@ -442,6 +702,7 @@ export function useLive2D(
             return;
         }
 
+        stopIdleTimer();
         live2dReady.value = false;
         steppedParamIds = [];
 
@@ -455,8 +716,17 @@ export function useLive2D(
             live2dModel = await Live2DModel.from("/" + newPath, { autoInteract: false });
             mountModel(live2dModel, newPath, BASE_W.value);
             await setupFrameSwitchProtection(live2dModel, newPath);
+
+            // [Phase 4] 装扮还原
+            await _loadAndApplyAppearance(newPath);
+
             live2dReady.value = true;
             console.info(`[Live2D] 模型切换成功 ✓  (${newPath})`);
+
+            if (idleConfig.enabled) {
+                rescheduleIdle();
+                console.info("[Live2D] 模型切换后，待机动画已在新模型上重启");
+            }
         } catch (e) {
             console.error("[Live2D] 模型切换失败:", e);
             live2dError.value = true;
@@ -473,5 +743,13 @@ export function useLive2D(
         setMouthOpen,
         getModelSettings,
         saveModelSettings,
+        // [Phase 4] 动作调度
+        playMotion,
+        getMotionList,
+        configureIdleMotion,
+        // [Phase 4] 装扮系统
+        getCoreParameters,
+        getCoreParts,
+        applyAppearance,
     };
 }
