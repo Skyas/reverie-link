@@ -1,10 +1,12 @@
 <script setup lang="ts">
-    import { ref, onMounted } from "vue";
+    import { ref, onMounted, onUnmounted } from "vue";
     import { revealItemInDir } from "@tauri-apps/plugin-opener";
-    import AppearancePanel from "./AppearancePanel.vue";
+    import { invoke } from "@tauri-apps/api/core";
+    import { listen } from "@tauri-apps/api/event";
 
-    // 装扮区域展开状态（进入时才加载）
-    const appearanceExpanded = ref(false);
+    // 装扮窗口是否已打开（用于阻止切换模型）
+    const appearanceWindowOpen = ref(false);
+    const unlisteners: (() => void)[] = [];
 
     // ── Toast ──────────────────────────────────────────────────────
     const msgText = ref("");
@@ -60,6 +62,10 @@
     }
 
     async function applyModel(path: string) {
+        if (appearanceWindowOpen.value) {
+            showMsg("请先关闭装扮窗口再切换模型", "warn");
+            return;
+        }
         selectedModelPath.value = path;
         localStorage.setItem("rl-model-path", path);
         loadModelDisplaySettings(path);
@@ -69,6 +75,17 @@
             console.info(`[Live2DTab] 已切换模型: ${path}`);
         } catch (e) { console.warn("[Live2DTab] model-changed emit failed:", e); }
         showMsg("✓ 模型已切换");
+    }
+
+    async function openAppearance() {
+        try {
+            await invoke("open_appearance");
+            appearanceWindowOpen.value = true;
+            console.info("[Live2DTab] 装扮窗口已打开");
+        } catch (e) {
+            console.warn("[Live2DTab] 打开装扮窗口失败:", e);
+            showMsg("无法打开装扮窗口", "warn");
+        }
     }
 
     async function applyModelSettings() {
@@ -141,6 +158,20 @@
         loadModelDisplaySettings(selectedModelPath.value);
         loadIdleMotion();
         await fetchLive2DModels();
+
+        // 监听装扮窗口关闭（Tauri 窗口关闭时 label="appearance" 的 destroy 事件）
+        unlisteners.push(
+            await listen("tauri://destroyed", () => {
+                // 该事件在任意窗口关闭时触发，
+                // 但装扮窗口关闭后 appearanceWindowOpen 重置即可
+                appearanceWindowOpen.value = false;
+                console.info("[Live2DTab] 装扮窗口已关闭");
+            })
+        );
+    });
+
+    onUnmounted(() => {
+        unlisteners.forEach(fn => fn());
     });
 </script>
 
@@ -267,17 +298,16 @@
 
         <!-- 装扮 -->
         <div class="global-section">
-            <div class="appearance-section-header" @click="appearanceExpanded = !appearanceExpanded">
-                <div class="global-section-title" style="cursor:pointer;">
-                    🎨 装扮
-                    <span class="expand-arrow" :class="{ expanded: appearanceExpanded }">▶</span>
-                </div>
-            </div>
-            <div v-if="appearanceExpanded" class="appearance-container">
-                <AppearancePanel />
-            </div>
-            <div v-else class="field-hint" style="cursor:pointer;" @click="appearanceExpanded = true">
-                点击展开，加载当前模型的装扮参数和部件开关。
+            <div class="global-section-title">🎨 装扮</div>
+            <div class="appearance-entry">
+                <p class="field-hint">调整当前模型的外观参数和部件显示。</p>
+                <button class="appearance-open-btn" @click="openAppearance"
+                        :disabled="appearanceWindowOpen">
+                    {{ appearanceWindowOpen ? "装扮窗口已打开" : "打开装扮面板" }}
+                </button>
+                <p v-if="appearanceWindowOpen" class="field-hint" style="color:#C08000;">
+                    ⚠️ 装扮窗口打开时无法切换模型，请先关闭装扮窗口。
+                </p>
             </div>
         </div>
 
@@ -542,20 +572,33 @@
     }
 
     /* ── 装扮区域 ─────────────────────────────────────────────── */
-    .appearance-section-header {
+    .appearance-entry {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 10px 14px;
+        background: var(--c-surface);
+        border: 1.5px solid var(--c-border);
+        border-radius: 12px;
+    }
+    .appearance-open-btn {
+        align-self: flex-start;
+        font-size: 13px;
+        font-weight: 600;
+        font-family: inherit;
+        padding: 8px 20px;
+        border: none;
+        border-radius: 20px;
+        background: linear-gradient(135deg, #A8D8EA, #FFB7C5);
+        color: white;
         cursor: pointer;
-        user-select: none;
+        transition: opacity 0.2s;
     }
-    .expand-arrow {
-        font-size: 10px;
-        color: var(--c-text-soft);
-        transition: transform 0.2s;
-        display: inline-block;
+    .appearance-open-btn:hover:not(:disabled) {
+        opacity: 0.88;
     }
-    .expand-arrow.expanded {
-        transform: rotate(90deg);
-    }
-    .appearance-container {
-        padding: 8px 0 0;
+    .appearance-open-btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
     }
 </style>

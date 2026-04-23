@@ -245,6 +245,30 @@ async fn open_history(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn open_appearance(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("appearance") {
+        win.show().map_err(|e| e.to_string())?;
+        win.set_focus().map_err(|e| e.to_string())?;
+    } else {
+        #[cfg(dev)]
+        let url = tauri::WebviewUrl::External(
+            "http://localhost:17420/appearance.html".parse().unwrap()
+        );
+        #[cfg(not(dev))]
+        let url = tauri::WebviewUrl::App("appearance.html".into());
+
+        tauri::WebviewWindowBuilder::new(&app, "appearance", url)
+            .title("Reverie Link · 装扮")
+            .inner_size(520.0, 620.0)
+            .resizable(true)
+            .center()
+            .build()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn open_devtools(app: tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         window.open_devtools();
@@ -481,6 +505,7 @@ pub fn run() {
             toggle_lock,
             open_settings,
             open_history,
+            open_appearance,
             update_menu_data,
             open_devtools,
         ])

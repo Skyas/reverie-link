@@ -90,7 +90,7 @@
 		"PartHairBack": 1,
 		"PartNeck": 1,
 		"PartArmA": 1,
-		"PartArmB": 1,
+		"PartArmB": 0,
 		"PartBody": 1,
 		"PartBackground": 1,
 		"PartSketch": 1,
