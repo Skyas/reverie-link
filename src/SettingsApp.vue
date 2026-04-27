@@ -66,6 +66,13 @@
         sendConfigToBackend(llmCfg, charCfg, { vision: visionCfg });
     }
 
+    // GlobalTab 保存语音输入配置
+    function onVoiceSaved(voiceCfg: object) {
+        const llmCfg = JSON.parse(localStorage.getItem("rl-llm") || "{}");
+        const charCfg = JSON.parse(localStorage.getItem("rl-character") || "{}");
+        sendConfigToBackend(llmCfg, charCfg, { voice: voiceCfg });
+    }
+
     // TTSTab 保存语音配置 → 通过 config-changed 发送给主窗口 WebSocket
     function onTTSSaved(ttsCfg: object) {
         const llmCfg  = JSON.parse(localStorage.getItem("rl-llm")  || "{}");
@@ -154,6 +161,7 @@
                     @tts-saved="onTTSSaved" />
             <GlobalTab v-if="activeTab === 'global'"
                        @vision-saved="onVisionSaved"
+                       @voice-saved="onVoiceSaved"
                        @memory-window-changed="onMemoryWindowChanged"
                        @size-preset-changed="onSizePresetChanged" />
         </div>

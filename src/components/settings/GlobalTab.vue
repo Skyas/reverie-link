@@ -82,6 +82,26 @@
         emit("memory-window-changed", index);
         showMsg(`✓ 记忆跨度已切换至「${MEMORY_WINDOW_OPTIONS[index].label}」`);
     }
+
+    // ── 语音输入 ───────────────────────────────────────────────────
+    function _loadVoiceCfg() {
+        try { return JSON.parse(localStorage.getItem("rl-voice") || "{}"); } catch { return {}; }
+    }
+    const _voiceCfg = _loadVoiceCfg();
+
+    const voiceEnabled   = ref<boolean>(!!_voiceCfg.enabled);
+    const voiceWindowSec = ref<number>(_voiceCfg.window_sec ?? 15);
+
+    async function saveVoice() {
+        const cfg = {
+            enabled: voiceEnabled.value,
+            window_sec: voiceWindowSec.value,
+        };
+        localStorage.setItem("rl-voice", JSON.stringify(cfg));
+        // 通过 config-changed 事件通知主窗口同步到后端
+        window.dispatchEvent(new StorageEvent("storage", { key: "rl-voice" }));
+        showMsg("✓ 语音输入配置已保存");
+    }
 </script>
 
 <template>
@@ -107,17 +127,37 @@
 
         <div class="divider"></div>
 
-        <!-- 语音设置（开发中） -->
-        <div class="global-section global-section-disabled">
-            <div class="global-section-title">🎙️ 语音设置 <span class="coming-badge">开发中</span></div>
-            <div class="field-group">
-                <label class="field-label">唤醒词</label>
-                <input class="field-input" disabled placeholder="例如：小玲" />
+        <!-- 语音输入设置 -->
+        <div class="global-section">
+            <div class="global-section-title">🎙️ 语音输入</div>
+
+            <div class="toggle-row" style="margin-bottom:10px;">
+                <span class="field-label">启用语音输入</span>
+                <label class="toggle-switch">
+                    <input type="checkbox" v-model="voiceEnabled" @change="saveVoice" />
+                    <span class="toggle-slider"></span>
+                </label>
             </div>
-            <div class="field-group">
-                <label class="field-label">音量</label>
-                <input type="range" class="field-range" disabled min="0" max="100" value="80" />
-            </div>
+            <p class="field-hint" style="color:var(--c-text-soft);margin-bottom:12px;">
+                开启后，桌宠会自动聆听你的语音并回应。无需唤醒词，通过语义判断识别对话意图。
+            </p>
+
+            <template v-if="voiceEnabled">
+                <div class="field-group" style="margin-bottom:12px;">
+                    <label class="field-label">
+                        对话窗口时长 <span class="field-note">{{ voiceWindowSec }} 秒</span>
+                    </label>
+                    <input type="range" class="field-range" min="5" max="60" step="1"
+                           v-model.number="voiceWindowSec" @change="saveVoice" />
+                    <p class="field-hint" style="margin-top:4px;">
+                        桌宠发言后，用户在该时间窗口内的语音会被直接视为回复，无需再次判断意图。
+                    </p>
+                </div>
+
+                <div class="action-row">
+                    <button class="save-btn" @click="saveVoice">保存语音输入配置</button>
+                </div>
+            </template>
         </div>
 
         <div class="divider"></div>

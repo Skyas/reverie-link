@@ -21,6 +21,8 @@
  * 不知道 WebSocket、窗口、Live2D 内部结构的存在。
  */
 
+import { ref } from "vue";
+
 const TTS_CONFIG_KEY_V2 = "rl-tts-v2";
 const BACKEND_BASE = "http://localhost:18000";
 
@@ -71,6 +73,7 @@ export function useTTS({ setMouthOpen }: TTSDeps) {
     let audioCtx:     AudioContext | null      = null;
     let lipSyncRafId: number                   = 0;
     let currentAudio: HTMLAudioElement | null  = null;
+    const isPlaying  = ref(false);
 
     // ── 启动时同步配置到后端 ──────────────────────────────────────
     async function syncConfigToBackend(): Promise<void> {
@@ -108,6 +111,7 @@ export function useTTS({ setMouthOpen }: TTSDeps) {
     function stopTTS() {
         if (lipSyncRafId) { cancelAnimationFrame(lipSyncRafId); lipSyncRafId = 0; }
         if (currentAudio) { currentAudio.pause(); currentAudio = null; }
+        isPlaying.value = false;
         setMouthOpen(0);
     }
 
@@ -138,9 +142,9 @@ export function useTTS({ setMouthOpen }: TTSDeps) {
             lipSyncRafId = requestAnimationFrame(lipSyncLoop);
         }
 
-        audio.addEventListener("play",  () => { lipSyncRafId = requestAnimationFrame(lipSyncLoop); });
-        audio.addEventListener("ended", () => { setMouthOpen(0); URL.revokeObjectURL(url); });
-        audio.addEventListener("error", () => { setMouthOpen(0); URL.revokeObjectURL(url); });
+        audio.addEventListener("play",  () => { isPlaying.value = true; lipSyncRafId = requestAnimationFrame(lipSyncLoop); });
+        audio.addEventListener("ended", () => { isPlaying.value = false; setMouthOpen(0); URL.revokeObjectURL(url); });
+        audio.addEventListener("error", () => { isPlaying.value = false; setMouthOpen(0); URL.revokeObjectURL(url); });
 
         await audio.play();
     }
@@ -187,5 +191,5 @@ export function useTTS({ setMouthOpen }: TTSDeps) {
         audioCtx?.close();
     }
 
-    return { speakText, stopTTS, destroyTTS, syncConfigToBackend };
+    return { speakText, stopTTS, destroyTTS, syncConfigToBackend, isPlaying };
 }

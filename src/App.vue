@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from "vue";
+import { ref, onMounted, onUnmounted, watch } from "vue";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -8,6 +8,7 @@ import { useLive2D } from "./composables/useLive2D";
 import { useTTS } from "./composables/useTTS";
 import { useWebSocket } from "./composables/useWebSocket";
 import { useWindowManager } from "./composables/useWindowManager";
+import { useVoiceInput } from "./composables/useVoiceInput";
 
 const isDev = import.meta.env.DEV;
 
@@ -17,7 +18,7 @@ const { sizePreset, sizeConfig, BASE_W, BASE_H, INPUT_W, BUBBLE_H } = useSizePre
 // ── 2. Live2D ──────────────────────────────────────────────────────────
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 const {
-    live2dReady, live2dError,
+    live2dReady,
     initLive2D, disposeLive2D, reloadLive2D,
     setEmotion, setMouthOpen, configureIdleMotion,
     // [Phase 4] 装扮系统
@@ -25,7 +26,7 @@ const {
 } = useLive2D(canvasRef, BASE_W, BASE_H);
 
 // ── 3. TTS ─────────────────────────────────────────────────────────────
-const { speakText, stopTTS, destroyTTS, syncConfigToBackend } = useTTS({ setMouthOpen });
+const { speakText, stopTTS, destroyTTS, syncConfigToBackend, isPlaying: isPetsSpeaking } = useTTS({ setMouthOpen });
 
 // ── 4. 静音状态（由托盘菜单控制，前端音频层生效）────────────────────────
 const isMuted = ref(false);
@@ -35,6 +36,7 @@ const {
     isConnected, isThinking,
     connectWS, disconnectWS,
     sendMessage, sendConfigure,
+    sendVoiceAudio, sendVoiceInterrupt,
 } = useWebSocket({
     onChatResponse: (cleanText, emotion) => {
         if (emotion) setEmotion(emotion);
@@ -46,9 +48,54 @@ const {
         showBubbleWithText(cleanText);
         if (!isMuted.value) speakText(cleanText, emotion || "neutral");
     },
+    onVoiceResult: (result) => {
+        if (result.triggered) {
+            isThinking.value = true;  // 显示思考动画，等待 chat_response
+        }
+        // triggered=false 时：完全静默，无任何可见操作
+    },
+    onInterrupted: () => {
+        stopTTS();
+        setMouthOpen(0);  // 重置 Live2D 口型动画
+    },
     onError: (message) => {
         showBubbleWithText("呜…出错了：" + message);
     },
+});
+
+// ── 语音输入 ───────────────────────────────────────────────────────────
+// TTS 结束后 500ms 冷却期，防止自循环
+let cooldownTimer: ReturnType<typeof setTimeout> | null = null;
+const COOLDOWN_MS = 500;
+
+function onTTSEnd() {
+    cooldownTimer = setTimeout(() => { cooldownTimer = null; }, COOLDOWN_MS);
+}
+function isCooldownActive(): boolean {
+    return cooldownTimer !== null;
+}
+
+const {
+    isListening, isUserSpeaking,
+    startListening, stopListening, destroyVoiceInput,
+} = useVoiceInput({
+    onSpeechStart: () => {
+        if (isPetsSpeaking.value) {
+            stopTTS();                         // 立即停止音频播放
+            sendVoiceInterrupt();              // 通知后端取消 LLM 任务
+        }
+    },
+    onSpeechEnd: (audio, durationMs) => {
+        if (durationMs < 300) return;        // 过滤咳嗽等极短噪声
+        if (isCooldownActive()) return;      // TTS 结束后 500ms 冷却期
+        sendVoiceAudio(audio);               // 发送 binary frame
+    },
+    onError: (msg) => console.error("[VoiceInput]", msg),
+});
+
+// TTS 播放状态同步到语音模块（用于冷却期管理）
+watch(isPetsSpeaking, (val) => {
+    if (!val) onTTSEnd();  // TTS 结束触发冷却期
 });
 
 // ── 6. 窗口管理 ────────────────────────────────────────────────────────
@@ -173,8 +220,29 @@ const onStorageChange = (e: StorageEvent) => {
     if (e.key === "rl-presets") {
         console.log("[App] presets 变更检测到，重新同步托盘");
         syncTrayMenu();
+    }
+    if (e.key === "rl-voice") {
+        console.log("[App] voice 配置变更检测到");
+        applyVoiceSettings();
+    }
+};
+
+// 应用语音输入设置（启动/停止监听 + 同步后端）
+function applyVoiceSettings() {
+    try {
+        const raw = localStorage.getItem("rl-voice");
+        const cfg = raw ? JSON.parse(raw) : {};
+        if (cfg.enabled) {
+            startListening().catch((e) => console.warn("[App] 启动语音监听失败:", e));
+        } else {
+            stopListening();
         }
-    };
+        // 同步到后端
+        sendConfigure({ voice: { window_sec: cfg.window_sec ?? 15 } });
+    } catch (e) {
+        console.warn("[App] 应用语音设置失败:", e);
+    }
+}
 
 onMounted(async () => {
     console.time("[⏱ onMounted 总耗时]");
@@ -205,6 +273,9 @@ onMounted(async () => {
 
     // 后端就绪后同步托盘（延迟 2s 确保 sidecar 已启动）
     setTimeout(syncTrayMenu, 2000);
+
+    // 【2026-04-27 语音输入系统】应用语音设置（可能启动麦克风监听）
+    applyVoiceSettings();
 
     // ── Tauri 事件监听 ─────────────────────────────────────────────
     unlisten.push(await listen("config-changed", (e) => {
@@ -321,6 +392,7 @@ onUnmounted(() => {
     unlisten.forEach(fn => fn());
     disposeLive2D();
     destroyTTS();
+    destroyVoiceInput();
 });
 </script>
 
@@ -404,6 +476,7 @@ onUnmounted(() => {
                 </transition>
 
                 <div class="status-dot" :class="{ connected: isConnected }"></div>
+                <div v-if="isListening" class="voice-listening-dot" title="语音输入已开启"></div>
             </div>
         </div>
         <!-- 右键上下文菜单 -->
@@ -547,6 +620,25 @@ onUnmounted(() => {
         .status-dot.connected {
             background: #81c784;
         }
+
+    /* ── 语音监听指示点 ───────────────────────────────────────── */
+    .voice-listening-dot {
+        position: absolute;
+        bottom: 6px;
+        right: 20px;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #ff8a80;
+        animation: pulse 1.5s infinite;
+        pointer-events: none;
+        z-index: 10;
+    }
+
+    @keyframes pulse {
+        0%, 100% { opacity: 0.6; transform: scale(1); }
+        50% { opacity: 1; transform: scale(1.3); }
+    }
 
     /* ── 控制栏 ───────────────────────────────────────────────── */
     .controls-bar {

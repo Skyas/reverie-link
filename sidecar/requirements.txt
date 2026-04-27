@@ -19,3 +19,9 @@ edge-tts
 # 以下为本地 RVC v2 变声依赖（rvc_infer.py 实装后启用）
 # torch
 # rvc-python
+
+# ── Phase 4: 语音输入（STT）────────────────────────────────────
+# sherpa-onnx：本地 SenseVoice 语音识别引擎
+# 安装后需下载模型到 sidecar/models/sense-voice-small-int8/
+# 若未安装，语音输入模块会自动降级为不可用状态
+sherpa-onnx

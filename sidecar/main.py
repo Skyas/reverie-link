@@ -62,6 +62,7 @@ from routers.live2d import router as live2d_router
 from routers.tts import router as tts_router
 from routers.memory_api import router as memory_router
 from tts import tts_manager
+from voice import VoiceProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +152,14 @@ async def websocket_chat(websocket: WebSocket):
     global LLM_TEMPERATURE, LLM_TOP_P, LLM_FREQ_PENALTY
     global vision_system, vision_speech_queue
 
+    # 【2026-04-27 语音输入系统】每个 WebSocket 连接持有一个 VoiceProcessor
+    voice_processor = VoiceProcessor(
+        llm_client=llm_client,
+        llm_model=LLM_MODEL,
+        character=current_character,
+        window_sec=15.0,
+    )
+
     if not vision_system:
         vision_system = VisionSystem(speech_queue=vision_speech_queue)
 
@@ -193,11 +202,188 @@ async def websocket_chat(websocket: WebSocket):
         character=current_character,
     )
 
+    # ── 内部：复用 chat flow ────────────────────────────────────
+    async def _handle_chat_round(user_msg: str):
+        """处理一轮对话（文字或语音触发均可复用）。"""
+        if vision_system:
+            vision_system.on_user_message()
+
+        user_timeline_msg = TimelineMessage.create(
+            msg_type=MessageType.USER_TEXT, content=user_msg,
+            session_id=session_id, character_id=session_character_id,
+        )
+        save_message(user_timeline_msg)
+
+        user_wants_screenshot = bool(_SCREENSHOT_KEYWORDS.search(user_msg))
+        screenshot_info: Optional[dict] = None
+        multimodal_screenshot: Optional[dict] = None
+
+        if user_wants_screenshot and vision_system:
+            if vision_system.is_main_multimodal:
+                multimodal_screenshot = await vision_system.capture_screenshot_only()
+            else:
+                screenshot_info = await vision_system.capture_for_user()
+
+        relevant = retrieve_relevant_summaries(query=user_msg, character_id=session_character_id)
+
+        if multimodal_screenshot and not multimodal_screenshot.get("error"):
+            messages = build_multimodal_screenshot_messages(
+                system_prompt, list(history), user_msg, img_b64=multimodal_screenshot["img_b64"],
+                window_title=multimodal_screenshot.get("window_title", ""), window_index=session_window_index,
+                character_id=session_character_id, character_name=current_character.get("name", ""),
+                relevant_summaries=relevant,
+            )
+        elif screenshot_info and not screenshot_info.get("error"):
+            messages = build_screenshot_messages(
+                system_prompt, list(history), user_msg, screenshot_info=screenshot_info,
+                window_index=session_window_index, character_id=session_character_id,
+                character_name=current_character.get("name", ""), relevant_summaries=relevant,
+            )
+        else:
+            messages = build_messages(
+                system_prompt, list(history), user_msg, window_index=session_window_index,
+                character_id=session_character_id, character_name=current_character.get("name", ""),
+                relevant_summaries=relevant,
+            )
+
+        kept_count    = len(_trim(list(history), session_window_index))
+        evicted_count = len(history) - kept_count
+        if evicted_count > 0:
+            evicted_msgs = session_messages[:evicted_count]
+            if evicted_msgs:
+                summary_queue.push(evicted_msgs)
+                del session_messages[:evicted_count]
+
+        try:
+            # 【2026-04-27 语音输入系统】将 LLM 调用包装为 task，供打断时取消
+            llm_task = asyncio.create_task(
+                llm_client.chat.completions.create(
+                    model=LLM_MODEL, messages=messages, max_tokens=300,
+                    temperature=LLM_TEMPERATURE, top_p=LLM_TOP_P, frequency_penalty=LLM_FREQ_PENALTY
+                )
+            )
+            voice_processor.register_llm_task(llm_task)
+            response = await llm_task
+            reply = response.choices[0].message.content.strip()
+            voice_processor.clear_llm_task()
+        except asyncio.CancelledError:
+            # 被打断，静默退出当前回合
+            voice_processor.clear_llm_task()
+            return
+        except Exception as e:
+            voice_processor.clear_llm_task()
+            friendly = f"调用失败：{str(e)[:80]}"
+            await websocket.send_text(json.dumps({"type": "error", "message": friendly}, ensure_ascii=False))
+            return
+
+        if reply.startswith("[NEED_SCREENSHOT]") and vision_system and not screenshot_info and not multimodal_screenshot:
+            if vision_system.is_main_multimodal:
+                fallback_shot = await vision_system.capture_screenshot_only()
+                if fallback_shot and not fallback_shot.get("error"):
+                    msgs2 = build_multimodal_screenshot_messages(
+                        system_prompt, list(history), user_msg, img_b64=fallback_shot["img_b64"],
+                        window_title=fallback_shot.get("window_title", ""), window_index=session_window_index,
+                        character_id=session_character_id, character_name=current_character.get("name", ""),
+                        relevant_summaries=relevant,
+                    )
+                    try:
+                        r2 = await llm_client.chat.completions.create(model=LLM_MODEL, messages=msgs2, max_tokens=300, temperature=LLM_TEMPERATURE, top_p=LLM_TOP_P, frequency_penalty=LLM_FREQ_PENALTY)
+                        reply = r2.choices[0].message.content.strip()
+                    except Exception:
+                        pass
+            else:
+                screenshot_info = await vision_system.capture_for_user()
+                if screenshot_info and not screenshot_info.get("error"):
+                    msgs2 = build_screenshot_messages(
+                        system_prompt, list(history), user_msg, screenshot_info=screenshot_info,
+                        window_index=session_window_index, character_id=session_character_id,
+                        character_name=current_character.get("name", ""), relevant_summaries=relevant,
+                    )
+                    try:
+                        r2 = await llm_client.chat.completions.create(model=LLM_MODEL, messages=msgs2, max_tokens=300, temperature=LLM_TEMPERATURE, top_p=LLM_TOP_P, frequency_penalty=LLM_FREQ_PENALTY)
+                        reply = r2.choices[0].message.content.strip()
+                    except Exception:
+                        pass
+
+        emotion = _extract_emotion(reply)
+
+        # 标签清理（不再处理 event 标签）
+        clean_reply = re.sub(r'\[(happy|sad|angry|shy|surprised|neutral|sigh)\]', '', reply, flags=re.IGNORECASE)
+        clean_reply = re.sub(r'\[NEED_SCREENSHOT\]', '', clean_reply, flags=re.IGNORECASE)
+        clean_reply = re.sub(r'\[[a-zA-Z_]+\]', '', clean_reply).strip()
+
+        # ── 退化重复检测：降级为 "……" 发送，不污染下一轮 ─────────
+        if is_degenerate_repetition(clean_reply):
+            logger.warning(
+                "[Chat] 检测到退化重复输出，降级为省略号 | 原文=%r",
+                clean_reply[:80],
+            )
+            # 降级输出
+            fallback_clean = "……"
+            fallback_reply = "……[neutral]"
+
+            # 仍然写入数据库（用户能在聊天记录里看到桌宠"沉默"了一下）
+            ai_timeline_msg = TimelineMessage.create(
+                msg_type=MessageType.AI_REPLY,
+                content=fallback_clean,
+                session_id=session_id,
+                character_id=session_character_id,
+                reply_to=user_timeline_msg.id,
+                metadata={"emotion": "neutral", "degenerate_filtered": True},
+            )
+            save_message(ai_timeline_msg)
+
+            # 关键：写入 history 的是降级后的"……"，而不是原来的复读文本
+            # 这样下一轮就不会再被坏内容污染
+            now_ts = time.time()
+            history.append({"role": "user",      "content": user_msg,       "timestamp": now_ts})
+            history.append({"role": "assistant", "content": fallback_clean, "timestamp": now_ts})
+
+            session_messages.append(user_timeline_msg)
+            session_messages.append(ai_timeline_msg)
+            extractor.on_round_complete(session_messages)
+
+            await websocket.send_text(json.dumps(
+                {"type": "chat_response", "message": fallback_reply},
+                ensure_ascii=False,
+            ))
+
+            # 桌宠回复发送完成 → 开启对话窗口
+            voice_processor.on_pet_response_sent()
+
+            if vision_system:
+                vision_system.on_user_message_done()
+            return
+
+        # ── 正常路径 ───────────────────────────────────────────
+        ai_timeline_msg = TimelineMessage.create(
+            msg_type=MessageType.AI_REPLY, content=clean_reply,
+            session_id=session_id, character_id=session_character_id,
+            reply_to=user_timeline_msg.id, metadata={"emotion": emotion} if emotion else {},
+        )
+        save_message(ai_timeline_msg)
+
+        now_ts = time.time()
+        history.append({"role": "user",      "content": user_msg,    "timestamp": now_ts})
+        history.append({"role": "assistant", "content": clean_reply, "timestamp": now_ts})
+
+        session_messages.append(user_timeline_msg)
+        session_messages.append(ai_timeline_msg)
+        extractor.on_round_complete(session_messages)
+
+        await websocket.send_text(json.dumps({"type": "chat_response", "message": reply}, ensure_ascii=False))
+
+        # 桌宠回复发送完成 → 开启对话窗口
+        voice_processor.on_pet_response_sent()
+
+        if vision_system:
+            vision_system.on_user_message_done()
+
     try:
         while True:
-            raw = None
+            message = None
             try:
-                raw = await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
+                message = await asyncio.wait_for(websocket.receive(), timeout=1.0)
             except asyncio.TimeoutError:
                 await _drain_vision_speech(
                     websocket=websocket,
@@ -215,8 +401,31 @@ async def websocket_chat(websocket: WebSocket):
                     temperature=LLM_TEMPERATURE,
                     top_p=LLM_TOP_P,
                     frequency_penalty=LLM_FREQ_PENALTY,
+                    voice_processor=voice_processor,
                 )
                 continue
+
+            # ── binary frame：语音数据 ───────────────────────────────
+            if "bytes" in message:
+                pcm_bytes = message["bytes"]
+                if pcm_bytes[0:1] != b'\x01':
+                    continue  # 未知类型，丢弃
+                pcm_payload = pcm_bytes[1:]
+                # 过短音频（<300ms，16kHz 单声道 int16 = 9600 bytes）直接丢弃
+                if len(pcm_payload) < 9600:
+                    continue
+                result = await voice_processor.process(pcm_payload)
+                if result:
+                    await websocket.send_text(json.dumps(result, ensure_ascii=False))
+                    if result.get("triggered"):
+                        # 复用现有 chat flow 处理识别文本
+                        await _handle_chat_round(result["text"])
+                continue
+
+            # ── text frame：JSON 消息 ─────────────────────────────────
+            if "text" not in message:
+                continue
+            raw = message["text"]
 
             try:
                 data = json.loads(raw)
@@ -229,6 +438,11 @@ async def websocket_chat(websocket: WebSocket):
 
             msg_type = data.get("type")
             user_msg = data.get("message", "").strip()
+
+            # ── 语音打断 ─────────────────────────────────────────────
+            if msg_type == "voice_interrupt":
+                await voice_processor.handle_interrupt(websocket)
+                continue
 
             if msg_type == "configure":
                 llm_cfg  = data.get("llm", {})
@@ -274,6 +488,7 @@ async def websocket_chat(websocket: WebSocket):
                 if char_cfg:
                     current_character = {**DEFAULT_CHARACTER, **char_cfg}
                     system_prompt     = build_system_prompt(current_character)
+                    voice_processor.update_character(current_character)
 
                 if "memory_window" in data:
                     raw_idx = data["memory_window"]
@@ -326,6 +541,16 @@ async def websocket_chat(websocket: WebSocket):
                         flush=True,
                     )
 
+                # ── 语音输入配置更新 ──────────────────────────────────
+                if "voice" in data:
+                    voice_cfg = data["voice"]
+                    if "window_sec" in voice_cfg:
+                        voice_processor.update_window_duration(voice_cfg["window_sec"])
+                    print(
+                        f"[Configure] 语音输入已更新 | window_sec={voice_cfg.get('window_sec')}",
+                        flush=True,
+                    )
+
                 extractor.update_config(llm_client=llm_client, model=LLM_MODEL, character=current_character, character_id=session_character_id)
                 summary_queue.update_config(llm_client=llm_client, model=LLM_MODEL, character=current_character, character_id=session_character_id)
 
@@ -335,162 +560,11 @@ async def websocket_chat(websocket: WebSocket):
             if msg_type != "chat" or not user_msg:
                 continue
 
-            if vision_system:
-                vision_system.on_user_message()
+            # 用户发送文字消息 → 触发对话窗口
+            voice_processor.on_user_interaction()
 
-            user_timeline_msg = TimelineMessage.create(
-                msg_type=MessageType.USER_TEXT, content=user_msg,
-                session_id=session_id, character_id=session_character_id,
-            )
-            save_message(user_timeline_msg)
-
-            user_wants_screenshot = bool(_SCREENSHOT_KEYWORDS.search(user_msg))
-            screenshot_info: Optional[dict] = None
-            multimodal_screenshot: Optional[dict] = None
-
-            if user_wants_screenshot and vision_system:
-                if vision_system.is_main_multimodal:
-                    multimodal_screenshot = await vision_system.capture_screenshot_only()
-                else:
-                    screenshot_info = await vision_system.capture_for_user()
-
-            relevant = retrieve_relevant_summaries(query=user_msg, character_id=session_character_id)
-
-            if multimodal_screenshot and not multimodal_screenshot.get("error"):
-                messages = build_multimodal_screenshot_messages(
-                    system_prompt, list(history), user_msg, img_b64=multimodal_screenshot["img_b64"],
-                    window_title=multimodal_screenshot.get("window_title", ""), window_index=session_window_index,
-                    character_id=session_character_id, character_name=current_character.get("name", ""),
-                    relevant_summaries=relevant,
-                )
-            elif screenshot_info and not screenshot_info.get("error"):
-                messages = build_screenshot_messages(
-                    system_prompt, list(history), user_msg, screenshot_info=screenshot_info,
-                    window_index=session_window_index, character_id=session_character_id,
-                    character_name=current_character.get("name", ""), relevant_summaries=relevant,
-                )
-            else:
-                messages = build_messages(
-                    system_prompt, list(history), user_msg, window_index=session_window_index,
-                    character_id=session_character_id, character_name=current_character.get("name", ""),
-                    relevant_summaries=relevant,
-                )
-
-            kept_count    = len(_trim(list(history), session_window_index))
-            evicted_count = len(history) - kept_count
-            if evicted_count > 0:
-                evicted_msgs = session_messages[:evicted_count]
-                if evicted_msgs:
-                    summary_queue.push(evicted_msgs)
-                    del session_messages[:evicted_count]
-
-            try:
-                response = await llm_client.chat.completions.create(
-                    model=LLM_MODEL, messages=messages, max_tokens=300,
-                    temperature=LLM_TEMPERATURE, top_p=LLM_TOP_P, frequency_penalty=LLM_FREQ_PENALTY
-                )
-                reply = response.choices[0].message.content.strip()
-            except Exception as e:
-                friendly = f"调用失败：{str(e)[:80]}"
-                await websocket.send_text(json.dumps({"type": "error", "message": friendly}, ensure_ascii=False))
-                continue
-
-            if reply.startswith("[NEED_SCREENSHOT]") and vision_system and not screenshot_info and not multimodal_screenshot:
-                if vision_system.is_main_multimodal:
-                    fallback_shot = await vision_system.capture_screenshot_only()
-                    if fallback_shot and not fallback_shot.get("error"):
-                        msgs2 = build_multimodal_screenshot_messages(
-                            system_prompt, list(history), user_msg, img_b64=fallback_shot["img_b64"],
-                            window_title=fallback_shot.get("window_title", ""), window_index=session_window_index,
-                            character_id=session_character_id, character_name=current_character.get("name", ""),
-                            relevant_summaries=relevant,
-                        )
-                        try:
-                            r2 = await llm_client.chat.completions.create(model=LLM_MODEL, messages=msgs2, max_tokens=300, temperature=LLM_TEMPERATURE, top_p=LLM_TOP_P, frequency_penalty=LLM_FREQ_PENALTY)
-                            reply = r2.choices[0].message.content.strip()
-                        except Exception:
-                            pass
-                else:
-                    screenshot_info = await vision_system.capture_for_user()
-                    if screenshot_info and not screenshot_info.get("error"):
-                        msgs2 = build_screenshot_messages(
-                            system_prompt, list(history), user_msg, screenshot_info=screenshot_info,
-                            window_index=session_window_index, character_id=session_character_id,
-                            character_name=current_character.get("name", ""), relevant_summaries=relevant,
-                        )
-                        try:
-                            r2 = await llm_client.chat.completions.create(model=LLM_MODEL, messages=msgs2, max_tokens=300, temperature=LLM_TEMPERATURE, top_p=LLM_TOP_P, frequency_penalty=LLM_FREQ_PENALTY)
-                            reply = r2.choices[0].message.content.strip()
-                        except Exception:
-                            pass
-
-            emotion = _extract_emotion(reply)
-
-            # 标签清理（不再处理 event 标签）
-            clean_reply = re.sub(r'\[(happy|sad|angry|shy|surprised|neutral|sigh)\]', '', reply, flags=re.IGNORECASE)
-            clean_reply = re.sub(r'\[NEED_SCREENSHOT\]', '', clean_reply, flags=re.IGNORECASE)
-            clean_reply = re.sub(r'\[[a-zA-Z_]+\]', '', clean_reply).strip()
-
-            # ── 退化重复检测：降级为 "……" 发送，不污染下一轮 ─────────
-            if is_degenerate_repetition(clean_reply):
-                logger.warning(
-                    "[Chat] 检测到退化重复输出，降级为省略号 | 原文=%r",
-                    clean_reply[:80],
-                )
-                # 降级输出
-                fallback_clean = "……"
-                fallback_reply = "……[neutral]"
-
-                # 仍然写入数据库（用户能在聊天记录里看到桌宠"沉默"了一下）
-                ai_timeline_msg = TimelineMessage.create(
-                    msg_type=MessageType.AI_REPLY,
-                    content=fallback_clean,
-                    session_id=session_id,
-                    character_id=session_character_id,
-                    reply_to=user_timeline_msg.id,
-                    metadata={"emotion": "neutral", "degenerate_filtered": True},
-                )
-                save_message(ai_timeline_msg)
-
-                # 关键：写入 history 的是降级后的"……"，而不是原来的复读文本
-                # 这样下一轮就不会再被坏内容污染
-                now_ts = time.time()
-                history.append({"role": "user",      "content": user_msg,       "timestamp": now_ts})
-                history.append({"role": "assistant", "content": fallback_clean, "timestamp": now_ts})
-
-                session_messages.append(user_timeline_msg)
-                session_messages.append(ai_timeline_msg)
-                extractor.on_round_complete(session_messages)
-
-                await websocket.send_text(json.dumps(
-                    {"type": "chat_response", "message": fallback_reply},
-                    ensure_ascii=False,
-                ))
-
-                if vision_system:
-                    vision_system.on_user_message_done()
-                continue
-
-            # ── 正常路径 ───────────────────────────────────────────
-            ai_timeline_msg = TimelineMessage.create(
-                msg_type=MessageType.AI_REPLY, content=clean_reply,
-                session_id=session_id, character_id=session_character_id,
-                reply_to=user_timeline_msg.id, metadata={"emotion": emotion} if emotion else {},
-            )
-            save_message(ai_timeline_msg)
-
-            now_ts = time.time()
-            history.append({"role": "user",      "content": user_msg,    "timestamp": now_ts})
-            history.append({"role": "assistant", "content": clean_reply, "timestamp": now_ts})
-
-            session_messages.append(user_timeline_msg)
-            session_messages.append(ai_timeline_msg)
-            extractor.on_round_complete(session_messages)
-
-            await websocket.send_text(json.dumps({"type": "chat_response", "message": reply}, ensure_ascii=False))
-
-            if vision_system:
-                vision_system.on_user_message_done()
+            # 复用 chat flow
+            await _handle_chat_round(user_msg)
 
     except WebSocketDisconnect:
         print(f"[WS] 会话 {session_id} 断开（角色：{session_character_id}）")

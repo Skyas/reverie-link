@@ -79,6 +79,7 @@ async def _drain_vision_speech(
     temperature: float = 0.8,
     top_p: float = 0.9,
     frequency_penalty: float = 0.5,
+    voice_processor=None,
 ) -> None:
     global _last_proactive_time
 
@@ -239,6 +240,10 @@ async def _drain_vision_speech(
         print(f"[VisionSpeech] ✗ 主动发言 LLM 调用失败: {e}", flush=True)
         return
 
+    # 【2026-04-27 语音输入系统】LLM 生成完成后开启 3 秒预窗口，覆盖生成延迟期间用户的语音
+    if voice_processor:
+        voice_processor.open_pre_window()
+
     emotion = _extract_emotion(reply)
 
     # ── 抹除标签 ───────────────────────────────────────────────
@@ -307,3 +312,7 @@ async def _drain_vision_speech(
         {"type": "vision_proactive_speech", "message": reply},
         ensure_ascii=False,
     ))
+
+    # 【2026-04-27 语音输入系统】发送完成后开启正式 15 秒对话窗口（自动覆盖预窗口）
+    if voice_processor:
+        voice_processor.on_pet_response_sent()

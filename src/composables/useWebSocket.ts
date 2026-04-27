@@ -4,13 +4,16 @@
  * 职责：
  *   - 建立 / 断开 / 自动重连 WebSocket
  *   - WS 连接建立后自动发送 configure（从 localStorage 读取）
- *   - 解析 chat_response / vision_proactive_speech / error 消息
+ *   - 解析 chat_response / vision_proactive_speech / voice_result / interrupted / error 消息
  *   - 维护 isConnected、isThinking 状态
  *   - 响应超时保护（30s）
+ *   - 支持语音数据 binary frame 发送
  *
  * 依赖注入（回调）：
  *   onChatResponse  — AI 回复到达时调用
  *   onVisionSpeech  — 视觉感知主动发言时调用
+ *   onVoiceResult   — 语音识别结果到达时调用
+ *   onInterrupted   — 打断确认到达时调用
  *   onError         — 错误或超时时调用
  *
  * 不知道 Live2D、TTS、窗口几何的存在，仅通过回调通知外部。
@@ -25,9 +28,20 @@ const RECONNECT_DELAY_MS = 3000;
 const THINKING_TIMEOUT_MS = 30000;
 
 // ── 回调接口定义 ──────────────────────────────────────────────────────
+export interface VoiceResult {
+    type: "voice_result";
+    text: string;
+    emotion: string | null;
+    language: string;
+    triggered: boolean;
+    reason: string;
+}
+
 export interface WebSocketCallbacks {
     onChatResponse: (cleanText: string, emotion: EmotionTag | null) => void;
     onVisionSpeech: (cleanText: string, emotion: EmotionTag | null) => void;
+    onVoiceResult?: (result: VoiceResult) => void;
+    onInterrupted?: () => void;
     onError:        (message: string) => void;
 }
 
@@ -38,6 +52,7 @@ export interface ConfigurePayload {
     memory_window?: number;
     character_id?: string;
     vision?:       object;
+    voice?:        object;
 }
 
 // ── 主体 ──────────────────────────────────────────────────────────────
@@ -60,6 +75,7 @@ export function useWebSocket(callbacks: WebSocketCallbacks) {
             character_id: payload.character_id
                 ?? localStorage.getItem("rl-active-preset-id") ?? "",
             ...(payload.vision ? { vision: payload.vision } : {}),
+            ...(payload.voice ? { voice: payload.voice } : {}),
         }));
     }
 
@@ -106,6 +122,34 @@ export function useWebSocket(callbacks: WebSocketCallbacks) {
         ws!.send(JSON.stringify({ type: "chat", message: msg }));
     }
 
+    // ── 语音数据发送 ──────────────────────────────────────────────────
+    /**
+     * Float32 (-1.0 ~ 1.0) → Int16 PCM (-32768 ~ 32767)
+     * 前加 1-byte type marker (0x01)
+     */
+    function encodeVoiceFrame(float32Array: Float32Array): ArrayBuffer {
+        const int16 = new Int16Array(float32Array.length);
+        for (let i = 0; i < float32Array.length; i++) {
+            const s = Math.max(-1, Math.min(1, float32Array[i]));
+            int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+        }
+        const result = new Uint8Array(1 + int16.length * 2);
+        result[0] = 0x01;  // 类型标记：语音数据
+        result.set(new Uint8Array(int16.buffer), 1);
+        return result.buffer;
+    }
+
+    function sendVoiceAudio(audio: Float32Array): void {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        const buffer = encodeVoiceFrame(audio);
+        ws.send(buffer);  // binary frame
+    }
+
+    function sendVoiceInterrupt(): void {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        ws.send(JSON.stringify({ type: "voice_interrupt" }));
+    }
+
     // ── 消息处理 ──────────────────────────────────────────────────────
     function handleMessage(event: MessageEvent) {
         const data = JSON.parse(event.data);
@@ -124,6 +168,14 @@ export function useWebSocket(callbacks: WebSocketCallbacks) {
                 console.log('[emotion]', emotion, cleanText)
                 callbacks.onVisionSpeech(cleanText, emotion);
             }
+
+        } else if (data.type === "voice_result") {
+            callbacks.onVoiceResult?.(data as VoiceResult);
+
+        } else if (data.type === "interrupted") {
+            isThinking.value = false;
+            if (thinkingTimer) { clearTimeout(thinkingTimer); thinkingTimer = null; }
+            callbacks.onInterrupted?.();
 
         } else if (data.type === "error") {
             isThinking.value = false;
@@ -162,5 +214,7 @@ export function useWebSocket(callbacks: WebSocketCallbacks) {
         disconnectWS,
         sendMessage,
         sendConfigure,
+        sendVoiceAudio,
+        sendVoiceInterrupt,
     };
 }
