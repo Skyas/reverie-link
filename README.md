@@ -250,6 +250,29 @@ public/rvc/
 
 ---
 
+## 🙏 致谢
+
+本项目离不开以下优秀开源项目的支撑：
+
+| 项目 | 用途 |
+|------|------|
+| [Tauri](https://github.com/tauri-apps/tauri) | 轻量级跨平台桌面应用框架（Rust + WebView） |
+| [Vue 3](https://github.com/vuejs/core) | 前端响应式 UI 框架 |
+| [Vite](https://github.com/vitejs/vite) | 前端构建工具 |
+| [PixiJS](https://github.com/pixijs/pixijs) | 2D WebGL 渲染引擎，驱动 Live2D 模型 |
+| [pixi-live2d-display](https://github.com/guansss/pixi-live2d-display) | PixiJS 的 Live2D 渲染插件 |
+| [FastAPI](https://github.com/tiangolo/fastapi) | Python 后端 Web 框架 |
+| [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) | 本地语音识别引擎（SenseVoice-Small） |
+| [SenseVoice](https://github.com/FunAudioLLM/SenseVoice) | 阿里巴巴开源多语言语音识别模型 |
+| [@ricky0123/vad-web](https://github.com/ricky0123/vad) | 浏览器端 Silero VAD 语音活动检测 |
+| [ONNX Runtime](https://github.com/microsoft/onnxruntime) | 跨平台神经网络推理运行时 |
+| [ChromaDB](https://github.com/chroma-core/chroma) | 向量数据库，长期记忆语义检索 |
+| [enigo](https://github.com/enigo-rs/enigo) | Rust 跨平台鼠标/键盘控制 |
+
+Live2D 模型渲染依赖 [Live2D Cubism Core SDK](https://www.live2d.com/download/cubism-sdk/download-native/)。
+
+---
+
 ## 📄 License
 
 MIT
