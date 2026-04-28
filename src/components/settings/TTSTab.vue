@@ -17,6 +17,7 @@
  *              3) v3.5 无预置音色时模板出现两套提示词（渲染/判定条件不一致）
  */
 import { ref, reactive, computed, onMounted, watch } from "vue";
+import { invoke } from "@tauri-apps/api/core";
 
 // ── openUrl 兼容封装 ───────────────────────────────────────────
 async function safeOpenUrl(url: string) {
@@ -139,6 +140,33 @@ function showMsg(text: string, type: "ok" | "warn" = "ok") {
     msgText.value = text;
     msgType.value = type;
     setTimeout(() => { msgText.value = ""; }, 2500);
+}
+
+// ── 语音输入状态 ──────────────────────────────────────────────
+function _loadVoiceCfg() {
+    try { return JSON.parse(localStorage.getItem("rl-voice") || "{}"); } catch { return {}; }
+}
+const _voiceCfg = _loadVoiceCfg();
+
+const voiceEnabled   = ref<boolean>(!!_voiceCfg.enabled);
+const voiceWindowSec = ref<number>(_voiceCfg.window_sec ?? 15);
+
+async function saveVoice() {
+    const cfg = {
+        enabled: voiceEnabled.value,
+        window_sec: voiceWindowSec.value,
+    };
+    localStorage.setItem("rl-voice", JSON.stringify(cfg));
+    emit("voice-saved", cfg);
+    showMsg("✓ 语音输入配置已保存");
+}
+
+async function openSttReadme() {
+    try {
+        await invoke("open_stt_readme");
+    } catch (e: any) {
+        showMsg("打开教程失败：" + String(e), "warn");
+    }
 }
 
 // ── TTS 配置状态 ──────────────────────────────────────────────
@@ -276,6 +304,7 @@ const showAdvanced  = ref(false);
 // ── emit ──────────────────────────────────────────────────────
 const emit = defineEmits<{
     "tts-saved": [cfg: object];
+    "voice-saved": [cfg: object];
 }>();
 
 // ── 加载配置 ──────────────────────────────────────────────────
@@ -651,6 +680,37 @@ onMounted(async () => {
             <span class="status-label">{{ engineStatus.label }}</span>
             <span v-if="engineStatus.error" class="status-error">· {{ engineStatus.error }}</span>
         </div>
+
+        <!-- ── 语音输入开关 ─────────────────────────────────── -->
+        <div class="field-group">
+            <div class="toggle-row">
+                <span class="field-label">🎙️ 启用语音输入</span>
+                <label class="toggle-switch">
+                    <input type="checkbox" v-model="voiceEnabled" @change="saveVoice" />
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+            <p class="field-hint">开启后，桌宠会自动聆听你的语音并回应。无需唤醒词，通过语义判断识别对话意图。</p>
+
+            <template v-if="voiceEnabled">
+                <div style="margin-top:12px;">
+                    <label class="field-label">
+                        对话窗口时长 <span class="field-note">{{ voiceWindowSec }} 秒</span>
+                    </label>
+                    <input type="range" class="field-range" min="5" max="60" step="1"
+                           v-model.number="voiceWindowSec" @change="saveVoice" />
+                    <p class="field-hint" style="margin-top:4px;">
+                        桌宠发言后，用户在该时间窗口内的语音会被直接视为回复，无需再次判断意图。
+                    </p>
+                </div>
+                <div class="action-row" style="margin-top:12px;">
+                    <button class="save-btn" @click="saveVoice">保存语音输入配置</button>
+                    <button class="save-btn secondary" @click="openSttReadme">📖 手动下载教程</button>
+                </div>
+            </template>
+        </div>
+
+        <div class="divider"></div>
 
         <!-- ── 启用开关 ────────────────────────────────────── -->
         <div class="field-group">

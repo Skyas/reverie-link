@@ -6,7 +6,7 @@
  * 内部承载 AppearancePanel 组件，提供完整的窗口框架（标题栏 + 样式）。
  */
 import { ref, onMounted } from "vue";
-import AppearancePanel from "./components/settings/AppearancePanel.vue";
+import AppearancePanel from "./components/settings/Appearancepanel.vue";
 
 const modelFolder = ref("");
 

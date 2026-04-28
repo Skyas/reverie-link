@@ -138,7 +138,6 @@ function confirmSave() {
 // ── 激活预设 ───────────────────────────────────────────────────
 async function activatePreset(preset: CharacterPreset) {
     loadPresetToForm(preset);
-    const llmCfg = JSON.parse(localStorage.getItem("rl-llm") || "{}");
     const charCfg = {
         name: preset.name, identity: preset.identity,
         personality: preset.personality, address: preset.address,

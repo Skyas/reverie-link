@@ -19,7 +19,7 @@
 | 🗣️ **双语音引擎** | ElevenLabs 云端拟真语音 与 本地 RVC v2 自训练音色，一键切换，唇音实时同步 |
 | 🌸 **角色卡系统** | 最多 10 个角色预设，即时切换，支持自定义人设、头像与对话示例 |
 | 🤖 **多厂商 LLM 接入** | 内置 15 家厂商预设，支持 DeepSeek / OpenAI / Gemini / Ollama 等任意兼容厂商 |
-| 🗣️ **全双工拟真语音交互** | WebRTC 硬件级回声消除、VAD 防吞字、打断机制与动态倾听窗口（开发中） |
+| 🗣️ **全双工拟真语音交互** | Silero VAD 本地检测 + SenseVoice STT + LLM 语义意图判断，无需唤醒词，支持打断与动态对话窗口 |
 | 🎮 **沉浸式游戏态势感知** | 通过 GSI / 本地 API / 轻量 CV 三策略实现零延迟战况感知（规划中） |
 | 🧠 **三阶混合记忆架构** | 滑动窗口短期记忆 + 核心档案 JSON + 向量数据库长期摘要（规划中） |
 
@@ -137,6 +137,8 @@ public/rvc/
  ┣ 📂 sidecar/              # Python 后端：LLM、TTS、RVC、记忆与视觉引擎
  ┃ ┣ 📂 memory/             # 三阶混合记忆架构（SQLite + ChromaDB + 核心提取）
  ┃ ┣ 📂 vision/             # 视觉感知系统（截屏预筛 + VLM 解析 + 决策引擎）
+ ┃ ┣ 📂 voice/              # 语音输入系统（VAD → STT → 意图判断 → 窗口管理）
+ ┃ ┣ 📂 models/             # 本地模型文件（SenseVoice STT、自动下载或手动放置）
  ┃ ┣ 📜 main.py             # FastAPI + WebSocket 主入口
  ┃ ┣ 📜 prompt_builder.py   # Prompt 组装模块（Layer 1 & 2 记忆注入）
  ┃ ┣ 📜 .env.example        # 环境变量模板（复制为 .env 后填写）
@@ -200,9 +202,9 @@ public/rvc/
 - [x] 唇音同步（AudioContext Analyser 实时驱动 ParamMouthOpenY）
 - [x] 角色卡即时切换（Tauri 事件通知，无需重启）
 - [x] 全局设置 Tab（模型管理 / 尺寸档位 / 语音配置）
-- [ ] 全双工语音系统：Silero-VAD + FunASR 流式 STT
+- [x] 全双工语音系统：Silero-VAD + SenseVoice 整段 STT + LLM 语义意图判断
+- [x] 打断机制 + 动态免唤醒倾听窗口
 - [ ] 唤醒词 + 全局快捷键按住说话
-- [ ] 打断机制 + 动态免唤醒倾听窗口
 
 ### Phase 3：高级感知与硬核底层 🚧 *进行中*
 

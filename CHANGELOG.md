@@ -35,6 +35,19 @@
 **设置界面新增文件夹快捷入口**
 - 全局设置 Tab 和角色设定 Tab 新增「打开文件夹」按钮，点击直接在资源管理器中打开 `public/live2d/` 或 `public/rvc/` 对应目录，简化用户放置模型文件的操作流程。
 
+**全双工语音输入系统**
+- **前端 VAD + STT 链路**：接入 `@ricky0123/vad-web` (Silero VAD WASM)，本地化模型加载无需 CDN；Float32 → Int16 PCM 编码后通过 WebSocket binary frame 发送。
+- **后端语音处理模块** (`sidecar/voice/` 子包)：串联 STT → TextSanitizer → ConversationContext → IntentFilter → InterruptHandler。
+  - `STTEngine`：基于 sherpa-onnx SenseVoice-Small int8，支持 Mock 模式（模型缺失时自动 fallback）。
+  - `ConversationContext`：IDLE / PRE_WINDOW(3s) / CONVERSATION_WINDOW(15s) 状态机，桌宠回复/用户文字消息后自动开启窗口。
+  - `IntentFilter`：窗口外交由 LLM 结合人设判断 `[OK]` / `[NOT_FOR_ME]`，避免误触发。
+  - `TextSanitizer`：过滤纯语气词、过短句、乱码；已修复支持日文假名与韩文 Hangul。
+- **打断机制**：桌宠 TTS 播放中用户说话 → 前端立即停止 TTS 并发送 `voice_interrupt` → 后端取消 LLM task → 发送 `interrupted` 确认 → 前端重置口型。
+- **自循环防护四层**：WebView2 AEC3 → 500ms TTS 冷却期 → TextSanitizer → 窗口外 LLM 意图判断。
+- **前端 UI**：主窗口控制栏 🎤/🎙️ 手动开关 + 红色脉冲监听指示点；设置界面「语音配置」Tab 集成语音输入配置（窗口时长滑块 + 手动下载教程按钮）。
+- **语音输入开关同步**：前后端均维护 `voice_enabled` 状态，关闭后前端停止 VAD 采集，后端直接丢弃 binary frame。
+- **模型下载**：`download_stt_model.py` 增强支持断点续传、SSL 兼容、文件大小校验；模型目录内置 `README.txt` 提供手动安装教程。
+
 **性能优化**
 - 优化 Vite 构建配置，显著改善开发环境启动时间。
 

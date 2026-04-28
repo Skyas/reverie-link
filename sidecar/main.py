@@ -159,6 +159,7 @@ async def websocket_chat(websocket: WebSocket):
         character=current_character,
         window_sec=15.0,
     )
+    voice_enabled = False  # 语音输入开关状态，由前端 configure 同步
 
     if not vision_system:
         vision_system = VisionSystem(speech_queue=vision_speech_queue)
@@ -407,14 +408,22 @@ async def websocket_chat(websocket: WebSocket):
 
             # ── binary frame：语音数据 ───────────────────────────────
             if "bytes" in message:
+                if not voice_enabled:
+                    print("[Voice] 语音输入已关闭，丢弃 binary frame", flush=True)
+                    continue
                 pcm_bytes = message["bytes"]
+                print(f"[Voice] 收到 binary frame | 总长度={len(pcm_bytes)} bytes | 首字节=0x{pcm_bytes[0]:02x}", flush=True)
                 if pcm_bytes[0:1] != b'\x01':
+                    print(f"[Voice] 丢弃：未知类型标记", flush=True)
                     continue  # 未知类型，丢弃
                 pcm_payload = pcm_bytes[1:]
                 # 过短音频（<300ms，16kHz 单声道 int16 = 9600 bytes）直接丢弃
                 if len(pcm_payload) < 9600:
+                    print(f"[Voice] 丢弃：音频过短 ({len(pcm_payload)} bytes < 9600)", flush=True)
                     continue
+                print(f"[Voice] 开始处理语音 | payload={len(pcm_payload)} bytes", flush=True)
                 result = await voice_processor.process(pcm_payload)
+                print(f"[Voice] 处理结果 | triggered={result.get('triggered') if result else None} text={result.get('text') if result else None}", flush=True)
                 if result:
                     await websocket.send_text(json.dumps(result, ensure_ascii=False))
                     if result.get("triggered"):
@@ -544,10 +553,12 @@ async def websocket_chat(websocket: WebSocket):
                 # ── 语音输入配置更新 ──────────────────────────────────
                 if "voice" in data:
                     voice_cfg = data["voice"]
+                    if "enabled" in voice_cfg:
+                        voice_enabled = bool(voice_cfg["enabled"])
                     if "window_sec" in voice_cfg:
                         voice_processor.update_window_duration(voice_cfg["window_sec"])
                     print(
-                        f"[Configure] 语音输入已更新 | window_sec={voice_cfg.get('window_sec')}",
+                        f"[Configure] 语音输入已更新 | enabled={voice_enabled} window_sec={voice_cfg.get('window_sec')}",
                         flush=True,
                     )
 

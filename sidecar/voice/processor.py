@@ -4,12 +4,17 @@ processor.py — 语音处理对外统一入口 VoiceProcessor
 职责：串联所有子模块，处理来自 WebSocket 的语音数据。
 """
 
+import asyncio
+import logging
+
 from .stt_engine import STTEngine
 from .text_sanitizer import TextSanitizer
 from .interrupt_handler import InterruptHandler
 from .conversation_context import ConversationContext
 from .intent_filter import IntentFilter
 from .window_quick_check import WindowQuickCheck
+
+logger = logging.getLogger(__name__)
 
 
 class VoiceProcessor:
@@ -31,17 +36,25 @@ class VoiceProcessor:
         处理一段语音 PCM 数据。
         返回 voice_result dict，或 None（音频无效/被过滤）。
         """
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info("[VoiceProcessor] 开始处理 | pcm=%d bytes", len(pcm_bytes))
+
         # 1. STT
-        result = await __import__("asyncio").to_thread(self.stt.recognize, pcm_bytes)
+        result = await asyncio.to_thread(self.stt.recognize, pcm_bytes)
         text = result.get("text", "").strip()
+        logger.info("[VoiceProcessor] STT 结果 | text=%r emotion=%s language=%s", text, result.get("emotion"), result.get("language"))
 
         # 2. 文本消歧层
         if self.sanitizer.is_degradation(text):
+            logger.info("[VoiceProcessor] 文本被消歧层过滤 | text=%r", text)
             return None
 
         # 3. 对话窗口 / 意图判断
         in_window = self.context.is_in_window()
+        logger.info("[VoiceProcessor] 窗口状态 | in_window=%s state=%s", in_window, self.context._state)
         should_reply = await self.filter.should_respond(text, self.context)
+        logger.info("[VoiceProcessor] 意图判断 | should_reply=%s", should_reply)
 
         # 4. 窗口内轻量规则（仅日志，不阻断）
         if in_window:
@@ -54,6 +67,7 @@ class VoiceProcessor:
             else "not_triggered"
         )
 
+        logger.info("[VoiceProcessor] 返回结果 | triggered=%s reason=%s", should_reply, reason)
         return {
             "type": "voice_result",
             "text": text,
@@ -61,6 +75,7 @@ class VoiceProcessor:
             "language": result.get("language"),
             "triggered": should_reply,
             "reason": reason,
+            "mock": result.get("mock", False),
         }
 
     async def handle_interrupt(self, websocket):

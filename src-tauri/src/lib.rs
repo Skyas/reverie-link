@@ -8,6 +8,7 @@ use tauri::{
     tray::TrayIconBuilder,
     Emitter, Manager,
 };
+use tauri_plugin_opener::OpenerExt;
 
 // 接收前端传来的菜单数据格式
 #[derive(Deserialize, Clone)]
@@ -276,6 +277,36 @@ fn open_devtools(app: tauri::AppHandle) {
     }
 }
 
+#[tauri::command]
+fn open_stt_readme(app: tauri::AppHandle) -> Result<(), String> {
+    // 1. 获取 README.txt 路径
+    let path = {
+        // 生产环境：从资源目录解析
+        let resource_result = app.path().resolve(
+            "models/sense-voice-small-int8/README.txt",
+            tauri::path::BaseDirectory::Resource,
+        );
+        match resource_result {
+            Ok(p) if p.exists() => p,
+            _ => {
+                // 开发环境回退：从当前工作目录
+                let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+                let dev_path = cwd.join("sidecar/models/sense-voice-small-int8/README.txt");
+                if dev_path.exists() {
+                    dev_path
+                } else {
+                    return Err("README.txt 未找到".to_string());
+                }
+            }
+        }
+    };
+
+    // 2. 直接用 OpenerExt 打开文件（绕过前端 command scope 权限限制）
+    app.opener()
+        .open_path(path.to_string_lossy(), None::<&str>)
+        .map_err(|e: tauri_plugin_opener::Error| e.to_string())
+}
+
 // ── 主入口 ────────────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -508,6 +539,7 @@ pub fn run() {
             open_appearance,
             update_menu_data,
             open_devtools,
+            open_stt_readme,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

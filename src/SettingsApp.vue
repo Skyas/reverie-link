@@ -82,7 +82,7 @@
     }
 
     // GlobalTab 切换记忆窗口
-    function onMemoryWindowChanged(index: number) {
+    function onMemoryWindowChanged(_index: number) {
         const llmCfg = JSON.parse(localStorage.getItem("rl-llm") || "{}");
         const charCfg = JSON.parse(localStorage.getItem("rl-character") || "{}");
         sendConfigToBackend(llmCfg, charCfg);
@@ -158,10 +158,10 @@
                           @open-notebook="onOpenNotebook" />
             <Live2DTab v-if="activeTab === 'live2d'" />
             <TTSTab v-if="activeTab === 'tts'"
-                    @tts-saved="onTTSSaved" />
+                    @tts-saved="onTTSSaved"
+                    @voice-saved="onVoiceSaved" />
             <GlobalTab v-if="activeTab === 'global'"
                        @vision-saved="onVisionSaved"
-                       @voice-saved="onVoiceSaved"
                        @memory-window-changed="onMemoryWindowChanged"
                        @size-preset-changed="onSizePresetChanged" />
         </div>
@@ -329,6 +329,16 @@
 
         .save-btn:hover {
             opacity: 0.88;
+        }
+
+    .save-btn.secondary {
+        background: transparent;
+        color: var(--c-pink-mid);
+        border: 1.5px solid var(--c-pink-mid);
+    }
+
+        .save-btn.secondary:hover {
+            background: rgba(255, 183, 197, 0.12);
         }
 
     .divider {

@@ -49,10 +49,12 @@ const {
         if (!isMuted.value) speakText(cleanText, emotion || "neutral");
     },
     onVoiceResult: (result) => {
+        // 识别结果只在控制台输出（调试用途），绝不显示在桌宠气泡中
+        console.log("[Voice] STT 结果 | text=%s triggered=%s mock=%s", result.text, result.triggered, result.mock);
         if (result.triggered) {
             isThinking.value = true;  // 显示思考动画，等待 chat_response
         }
-        // triggered=false 时：完全静默，无任何可见操作
+        // triggered=false 时：桌宠完全静默，气泡保持空白
     },
     onInterrupted: () => {
         stopTTS();
@@ -76,7 +78,7 @@ function isCooldownActive(): boolean {
 }
 
 const {
-    isListening, isUserSpeaking,
+    isListening,
     startListening, stopListening, destroyVoiceInput,
 } = useVoiceInput({
     onSpeechStart: () => {
@@ -232,16 +234,26 @@ function applyVoiceSettings() {
     try {
         const raw = localStorage.getItem("rl-voice");
         const cfg = raw ? JSON.parse(raw) : {};
+        console.log("[App] applyVoiceSettings | enabled=", cfg.enabled, "window_sec=", cfg.window_sec);
         if (cfg.enabled) {
             startListening().catch((e) => console.warn("[App] 启动语音监听失败:", e));
         } else {
             stopListening();
         }
-        // 同步到后端
-        sendConfigure({ voice: { window_sec: cfg.window_sec ?? 15 } });
+        // 同步到后端（包含 enabled 状态，让后端也能拒绝语音数据）
+        sendConfigure({ voice: { enabled: cfg.enabled, window_sec: cfg.window_sec ?? 15 } });
     } catch (e) {
         console.warn("[App] 应用语音设置失败:", e);
     }
+}
+
+// 手动切换语音输入（控制栏按钮）
+function toggleVoiceInput() {
+    const raw = localStorage.getItem("rl-voice");
+    const cfg = raw ? JSON.parse(raw) : {};
+    cfg.enabled = !cfg.enabled;
+    localStorage.setItem("rl-voice", JSON.stringify(cfg));
+    applyVoiceSettings();
 }
 
 onMounted(async () => {
@@ -286,9 +298,15 @@ onMounted(async () => {
             character_id?: string;
             vision?: object;
             size_preset?: "small" | "medium" | "large";
+            voice?: object;
         };
         if (payload.size_preset) {
             sizePreset.value = payload.size_preset;
+        }
+        // 【2026-04-27 语音输入系统】同步设置窗口传来的语音配置
+        if (payload.voice) {
+            localStorage.setItem("rl-voice", JSON.stringify(payload.voice));
+            applyVoiceSettings();
         }
         sendConfigure(payload);
         // 配置变更时重新同步（如角色增删、模型增删）
@@ -460,7 +478,9 @@ onUnmounted(() => {
                         <button class="ctrl-btn" @mousedown.stop @click.stop="toggleLock" title="锁定">🔓</button>
                         <button class="ctrl-btn" @mousedown.stop @click.stop="openSettings" title="设置">⚙️</button>
                         <button class="ctrl-btn" @mousedown.stop @click.stop="openHistory" title="聊天记录">📋</button>
-                        <button class="ctrl-btn" @mousedown.stop @click.stop title="音量">🔊</button>
+                        <button class="ctrl-btn" @mousedown.stop @click.stop="toggleVoiceInput" :title="isListening ? '关闭语音输入' : '开启语音输入'">
+                            {{ isListening ? "🎙️" : "🎤" }}
+                        </button>
                         <button class="ctrl-btn" @mousedown.stop @click.stop="toggleInput" title="输入">💬</button>
                     </div>
                 </transition>

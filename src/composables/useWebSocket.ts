@@ -35,6 +35,7 @@ export interface VoiceResult {
     language: string;
     triggered: boolean;
     reason: string;
+    mock?: boolean;
 }
 
 export interface WebSocketCallbacks {

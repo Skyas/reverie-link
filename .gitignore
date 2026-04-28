@@ -42,4 +42,12 @@ src-tauri/target/
 public/rvc/*
 !public/rvc/这里放本地RVC V2模型.txt
 
+# 语音输入模型（VAD + ONNX Runtime WASM，npm install 后自动生成）
+public/*.onnx
+public/*.wasm
+public/vad.worklet.bundle.min.js
+
+# STT 模型（程序运行时自动下载）
+sidecar/models/
+
 data/**
