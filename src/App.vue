@@ -183,6 +183,12 @@ onMounted(async () => {
     // TTS：将 localStorage 中保存的配置同步给后端（后端重启时恢复状态）
     syncConfigToBackend().catch(e => console.warn("[TTS] 启动同步失败:", e));
 
+    // 同步截屏排除设置到 Rust（默认开启，用户可在设置或托盘关闭）
+    const screenshotExcluded = localStorage.getItem("rl-screenshot-exclusion") !== "false";
+    invoke("set_screenshot_exclusion", { enabled: screenshotExcluded })
+        .then(() => console.log("[App] 截屏排除状态已同步:", screenshotExcluded))
+        .catch(e => console.warn("[App] 截屏排除同步失败:", e));
+
     // 并行：窗口位置初始化 + Live2D 初始化
     await Promise.all([
         (async () => {
@@ -308,6 +314,12 @@ onMounted(async () => {
         parts: Record<string, number>;
     }>("apply-appearance", (e) => {
         applyAppearance(e.payload);
+    }));
+
+    // 托盘菜单切换截屏排除时，同步到 localStorage
+    unlisten.push(await listen<boolean>("screenshot-exclusion-changed", (e) => {
+        localStorage.setItem("rl-screenshot-exclusion", String(e.payload));
+        console.log("[App] 截屏排除状态已更新:", e.payload);
     }));
 
     window.addEventListener("storage", onStorageChange);

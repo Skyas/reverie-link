@@ -31,6 +31,23 @@
         showMsg("✓ 尺寸已切换");
     }
 
+    // ── 截屏排除 ───────────────────────────────────────────────────
+    const screenshotExclusion = ref<boolean>(
+        localStorage.getItem("rl-screenshot-exclusion") !== "false"
+    );
+
+    async function saveScreenshotExclusion() {
+        const enabled = screenshotExclusion.value;
+        localStorage.setItem("rl-screenshot-exclusion", String(enabled));
+        try {
+            const { invoke } = await import("@tauri-apps/api/core");
+            await invoke("set_screenshot_exclusion", { enabled });
+            showMsg(enabled ? "✓ 截图时已隐藏桌宠" : "✓ 截图时可显示桌宠");
+        } catch (e) {
+            showMsg("⚠️ 设置失败：" + e, "warn");
+        }
+    }
+
     // ── 视觉感知 ───────────────────────────────────────────────────
     const VISION_TALK_OPTIONS = [
         { value: 0, label: "话少", desc: "阈值 30，安静" },
@@ -103,6 +120,22 @@
                     <div class="size-desc">{{ opt.desc }}</div>
                 </div>
             </div>
+        </div>
+
+        <!-- 截屏排除 -->
+        <div class="global-section">
+            <div class="global-section-title">📸 截屏保护</div>
+            <div class="toggle-row" style="margin-bottom:8px;">
+                <span class="field-label">截图时隐藏桌宠</span>
+                <label class="toggle-switch">
+                    <input type="checkbox" v-model="screenshotExclusion" @change="saveScreenshotExclusion" />
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+            <p class="field-hint" style="color:var(--c-text-soft);">
+                开启后，使用系统截图工具时将不会捕获到桌宠窗口，防止 AI 将模型误判为屏幕内容。
+                关闭后，可以正常截取到桌宠画面。
+            </p>
         </div>
 
         <div class="divider"></div>

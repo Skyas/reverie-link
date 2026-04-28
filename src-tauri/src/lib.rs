@@ -20,6 +20,7 @@ pub struct TrayMenuData {
 pub struct AppState {
     pub is_passthrough: Mutex<bool>,
     pub is_muted: Mutex<bool>,
+    pub is_screenshot_excluded: Mutex<bool>,
     pub characters: Mutex<Vec<TrayMenuData>>,
     pub models: Mutex<Vec<TrayMenuData>>,
     // 当前激活项（用于托盘菜单勾选显示）
@@ -52,6 +53,16 @@ fn update_tray_menu(app: &tauri::AppHandle) {
     let visibility_label = if is_visible { "👁️ 隐藏桌宠" } else { "👁️ 显示桌宠" };
     let visibility_item = MenuItem::with_id(
         app, "toggle_visibility", visibility_label, true, None::<&str>
+    ).unwrap();
+
+    let is_screenshot_excluded = *state.is_screenshot_excluded.lock().unwrap();
+    let screenshot_label = if is_screenshot_excluded {
+        "🙈 截图时隐藏桌宠"
+    } else {
+        "👀 截图时显示桌宠"
+    };
+    let screenshot_item = MenuItem::with_id(
+        app, "toggle_screenshot_exclusion", screenshot_label, true, None::<&str>
     ).unwrap();
 
     let sep1 = PredefinedMenuItem::separator(app).unwrap();
@@ -135,7 +146,7 @@ fn update_tray_menu(app: &tauri::AppHandle) {
 
     // ── 组装菜单 ──────────────────────────────────────────────────
     let menu = Menu::with_items(app, &[
-        &toggle_item, &visibility_item, &sep1,
+        &toggle_item, &visibility_item, &screenshot_item, &sep1,
         &switch_char_menu, &switch_model_menu, &sep2,
         &mute_item, &sep3,
         &reset_pos_item, &settings_item, &reload_item, &sep4,
@@ -276,6 +287,33 @@ fn open_devtools(app: tauri::AppHandle) {
     }
 }
 
+#[tauri::command]
+fn set_screenshot_exclusion(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    enabled: bool,
+) -> Result<bool, String> {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(window) = app.get_webview_window("main") {
+            if let Ok(hwnd) = window.hwnd() {
+                use windows_sys::Win32::UI::WindowsAndMessaging::SetWindowDisplayAffinity;
+                const WDA_EXCLUDEFROMCAPTURE: u32 = 0x00000011;
+                const WDA_NONE: u32 = 0x00000000;
+                let affinity = if enabled { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
+                let result = unsafe { SetWindowDisplayAffinity(hwnd.0, affinity) };
+                if result == 0 {
+                    return Err("SetWindowDisplayAffinity 调用失败".to_string());
+                }
+            }
+        }
+    }
+    *state.is_screenshot_excluded.lock().unwrap() = enabled;
+    update_tray_menu(&app);
+    println!("[Tauri] 截屏排除状态: {}", enabled);
+    Ok(enabled)
+}
+
 // ── 主入口 ────────────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -291,6 +329,7 @@ pub fn run() {
             app.manage(AppState {
                 is_passthrough: Mutex::new(false),
                 is_muted: Mutex::new(false),
+                is_screenshot_excluded: Mutex::new(true),
                 characters: Mutex::new(Vec::new()),
                 models: Mutex::new(Vec::new()),
                 active_character_id: Mutex::new(None),
@@ -376,6 +415,32 @@ pub fn run() {
                             }
                             update_tray_menu(app);
                             println!("[Tauri] 静音状态: {}", new_muted);
+                        }
+
+                        "toggle_screenshot_exclusion" => {
+                            let state = app.state::<AppState>();
+                            let new_state = {
+                                let mut excluded = state.is_screenshot_excluded.lock().unwrap();
+                                *excluded = !*excluded;
+                                *excluded
+                            };
+                            #[cfg(target_os = "windows")]
+                            {
+                                if let Some(win) = app.get_webview_window("main") {
+                                    if let Ok(hwnd) = win.hwnd() {
+                                        use windows_sys::Win32::UI::WindowsAndMessaging::SetWindowDisplayAffinity;
+                                        const WDA_EXCLUDEFROMCAPTURE: u32 = 0x00000011;
+                                        const WDA_NONE: u32 = 0x00000000;
+                                        let affinity = if new_state { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
+                                        unsafe { SetWindowDisplayAffinity(hwnd.0, affinity); }
+                                    }
+                                }
+                            }
+                            if let Some(win) = app.get_webview_window("main") {
+                                let _ = win.emit("screenshot-exclusion-changed", new_state);
+                            }
+                            update_tray_menu(app);
+                            println!("[Tauri] 截屏排除切换: {}", new_state);
                         }
 
                         "reset_position" => {
@@ -508,6 +573,7 @@ pub fn run() {
             open_appearance,
             update_menu_data,
             open_devtools,
+            set_screenshot_exclusion,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
