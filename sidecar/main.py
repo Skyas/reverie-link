@@ -492,8 +492,11 @@ async def websocket_chat(websocket: WebSocket):
             if vision_system:
                 vision_system.on_user_message_done()
 
-    except WebSocketDisconnect:
-        print(f"[WS] 会话 {session_id} 断开（角色：{session_character_id}）")
+    except (WebSocketDisconnect, RuntimeError) as e:
+        if isinstance(e, RuntimeError):
+            print(f"[WS] 会话 {session_id} 因连接异常断开（{e}）")
+        else:
+            print(f"[WS] 会话 {session_id} 断开（角色：{session_character_id}）")
         await extractor.on_session_end(session_messages)
         summary_queue.flush_now()
 

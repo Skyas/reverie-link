@@ -26,7 +26,7 @@ import logging
 import re
 import time
 
-from fastapi.websockets import WebSocket
+from fastapi.websockets import WebSocket, WebSocketDisconnect
 
 from utils.emotion import _extract_emotion
 from utils.dedup import is_degenerate_repetition
@@ -303,7 +303,11 @@ async def _drain_vision_speech(
     )
     print(f"[VisionSpeech]   清洗后内容: {clean_reply!r}", flush=True)
 
-    await websocket.send_text(json.dumps(
-        {"type": "vision_proactive_speech", "message": reply},
-        ensure_ascii=False,
-    ))
+    try:
+        await websocket.send_text(json.dumps(
+            {"type": "vision_proactive_speech", "message": reply},
+            ensure_ascii=False,
+        ))
+    except (WebSocketDisconnect, RuntimeError):
+        print("[VisionSpeech] 主动发言发送时连接已断开，跳过", flush=True)
+        return
